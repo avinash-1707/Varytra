@@ -1,0 +1,27 @@
+{
+  "name": "varytra",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@11.20.0",
+  "scripts": {
+    "dev": "docker compose up -d && pnpm --parallel --filter @varytra/web --filter @varytra/api --filter @varytra/worker dev",
+    "lint": "eslint .",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run"
+  },
+  "type": "module",
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.4.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@varytra/schemas": "workspace:*",
+    "eslint": "^10.10.0",
+    "globals": "^17.12.0",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.69.0",
+    "vite": "^7.3.6",
+    "vitest": "^5.0.0"
+  }
+}
