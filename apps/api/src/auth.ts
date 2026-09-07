@@ -130,6 +130,11 @@ export function createAuth(config: AuthConfig, emailSender: OtpEmailSender) {
   });
 
   return Object.assign(auth, {
+    getSessionUserId: async (headers: Headers): Promise<string | undefined> => {
+      const session = await auth.api.getSession({ headers });
+
+      return session?.user.id;
+    },
     isRecentSession: async (headers: Headers): Promise<boolean> => {
       const session = await auth.api.getSession({ headers });
 

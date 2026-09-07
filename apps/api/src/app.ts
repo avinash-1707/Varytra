@@ -1,15 +1,20 @@
 import Fastify from 'fastify';
 import { fromNodeHeaders } from 'better-auth/node';
 import { createLogger, runWithLogContext, serializeError, type Logger } from '@varytra/runtime';
+import type { Pool } from 'pg';
+import { withOrganizationTransaction } from '@varytra/infrastructure';
+import { resolveMembership, AuthorizationError, requireCapability, type Capability, type Membership } from './authorization.js';
 
 export interface AuthHandler {
   readonly handler: (request: Request) => Promise<Response>;
+  readonly getSessionUserId?: (headers: Headers) => Promise<string | undefined>;
   readonly isRecentSession: (headers: Headers) => Promise<boolean>;
 }
 
 export interface BuildAppOptions {
   readonly auth?: AuthHandler;
   readonly logger?: Logger;
+  readonly database?: Pool;
 }
 
 export function buildApp(options: BuildAppOptions = {}) {
@@ -71,6 +76,55 @@ export function buildApp(options: BuildAppOptions = {}) {
         response.headers.forEach((value, key) => reply.header(key, value));
         return reply.status(response.status).send(response.body === null ? null : await response.text());
       },
+    });
+  }
+
+  if (options.auth?.getSessionUserId !== undefined && options.database !== undefined) {
+    async function authenticatedMembership(request: { readonly headers: Record<string, string | string[] | undefined> }): Promise<Membership> {
+      const userId = await options.auth!.getSessionUserId!(fromNodeHeaders(request.headers));
+      if (userId === undefined) {
+        throw new AuthorizationError('invalid_credentials');
+      }
+      const selectedOrganization = request.headers['x-varytra-organization'];
+      const organizationId = Array.isArray(selectedOrganization) ? selectedOrganization[0] : selectedOrganization;
+
+      return resolveMembership(options.database!, userId, organizationId);
+    }
+
+    function authorize(membership: Membership, capability: Capability): void {
+      requireCapability(membership.role, capability);
+    }
+
+    app.get('/v1/organization/authorization', async (request, reply) => {
+      try {
+        const membership = await authenticatedMembership(request);
+        return { organization_id: membership.organizationId, role: membership.role };
+      } catch (error) {
+        if (error instanceof AuthorizationError) {
+          return reply.status(error.code === 'invalid_credentials' ? 401 : error.code === 'active_organization_required' ? 409 : 404).send({ error: error.code });
+        }
+        throw error;
+      }
+    });
+
+    app.get('/v1/organization/members', async (request, reply) => {
+      try {
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'members:read');
+        const members = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          const result = await client.query(
+            'SELECT user_id AS "userId", role FROM organization_memberships WHERE organization_id = $1 ORDER BY created_at',
+            [membership.organizationId],
+          );
+          return result.rows;
+        });
+        return { members };
+      } catch (error) {
+        if (error instanceof AuthorizationError) {
+          return reply.status(error.code === 'invalid_credentials' ? 401 : error.code === 'active_organization_required' ? 409 : error.code === 'forbidden' ? 403 : 404).send({ error: error.code });
+        }
+        throw error;
+      }
     });
   }
 
