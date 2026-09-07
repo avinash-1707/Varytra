@@ -19,4 +19,14 @@ describe('auth foundation', () => {
       secret: '0123456789abcdef0123456789abcdef',
     });
   });
+
+  it('requires both Google OAuth credentials when either is configured', () => {
+    expect(() => loadAuthConfig({
+      APP_URL: 'http://localhost:5173',
+      BETTER_AUTH_SECRET: '0123456789abcdef0123456789abcdef',
+      BETTER_AUTH_URL: 'http://localhost:3000',
+      DATABASE_URL: 'postgres://varytra:varytra@127.0.0.1:5432/varytra',
+      GOOGLE_CLIENT_ID: 'google-client-id',
+    })).toThrow('GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be configured together');
+  });
 });

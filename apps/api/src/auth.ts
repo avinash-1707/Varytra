@@ -8,12 +8,21 @@ const authConfigSchema = z.object({
   DATABASE_URL: z.url(),
   BETTER_AUTH_SECRET: z.string().min(32),
   BETTER_AUTH_URL: z.url(),
-});
+  GOOGLE_CLIENT_ID: z.string().min(1).optional(),
+  GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
+}).refine(
+  (config) => (config.GOOGLE_CLIENT_ID === undefined) === (config.GOOGLE_CLIENT_SECRET === undefined),
+  { message: 'GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be configured together' },
+);
 
 export interface AuthConfig {
   readonly appUrl: string;
   readonly baseUrl: string;
   readonly databaseUrl: string;
+  readonly google?: Readonly<{
+    clientId: string;
+    clientSecret: string;
+  }>;
   readonly secret: string;
 }
 
@@ -29,19 +38,27 @@ export function loadAuthConfig(environment: NodeJS.ProcessEnv): AuthConfig {
   const parsed = authConfigSchema.safeParse(environment);
 
   if (!parsed.success) {
-    throw new Error(`Invalid auth configuration: ${parsed.error.issues.map((issue) => issue.path.join('.')).join(', ')}`);
+    throw new Error(`Invalid auth configuration: ${parsed.error.issues.map((issue) => (
+      issue.path.length === 0 ? issue.message : issue.path.join('.')
+    )).join(', ')}`);
   }
 
   return {
     baseUrl: parsed.data.BETTER_AUTH_URL,
     appUrl: parsed.data.APP_URL,
     databaseUrl: parsed.data.DATABASE_URL,
+    ...(parsed.data.GOOGLE_CLIENT_ID === undefined ? {} : {
+      google: {
+        clientId: parsed.data.GOOGLE_CLIENT_ID,
+        clientSecret: parsed.data.GOOGLE_CLIENT_SECRET!,
+      },
+    }),
     secret: parsed.data.BETTER_AUTH_SECRET,
   };
 }
 
 export function createAuth(config: AuthConfig, emailSender: OtpEmailSender) {
-  return betterAuth({
+  const auth = betterAuth({
     baseURL: config.baseUrl,
     database: createDatabasePool({ connectionString: config.databaseUrl }),
     secret: config.secret,
@@ -53,9 +70,18 @@ export function createAuth(config: AuthConfig, emailSender: OtpEmailSender) {
     },
     account: {
       accountLinking: {
+        allowUnlinkingAll: false,
         disableImplicitLinking: true,
       },
     },
+    session: {
+      freshAge: 60 * 60 * 24,
+    },
+    ...(config.google === undefined ? {} : {
+      socialProviders: {
+        google: config.google,
+      },
+    }),
     plugins: [emailOTP({
       allowedAttempts: 3,
       overrideDefaultEmailVerification: true,
@@ -68,5 +94,13 @@ export function createAuth(config: AuthConfig, emailSender: OtpEmailSender) {
         }
       },
     })],
+  });
+
+  return Object.assign(auth, {
+    isRecentSession: async (headers: Headers): Promise<boolean> => {
+      const session = await auth.api.getSession({ headers });
+
+      return session !== null && Date.now() - new Date(session.session.createdAt).getTime() <= 86_400_000;
+    },
   });
 }
