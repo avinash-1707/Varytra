@@ -20,7 +20,7 @@ describeDatabase('auth recovery', () => {
   beforeEach(async () => {
     await runMigrations(connectionString!);
     const database = createDatabasePool({ connectionString: connectionString! });
-    await database.query('TRUNCATE account, session, verification, "user" CASCADE');
+    await database.query('TRUNCATE account_security_events, account, session, verification, "user" CASCADE');
     await database.end();
     sentOtps = [];
     app = buildApp({
@@ -83,9 +83,17 @@ describeDatabase('auth recovery', () => {
 
     const database = createDatabasePool({ connectionString: connectionString! });
     const sessions = await database.query('SELECT id FROM session');
+    const auditEvents = await database.query<{ readonly action: string }>(
+      'SELECT action FROM account_security_events ORDER BY occurred_at',
+    );
     await database.end();
 
     expect(reset.statusCode).toBe(200);
     expect(sessions.rows).toEqual([]);
+    expect(auditEvents.rows).toEqual([
+      { action: 'auth.account_linked' },
+      { action: 'auth.email_verified' },
+      { action: 'auth.password_reset' },
+    ]);
   });
 });

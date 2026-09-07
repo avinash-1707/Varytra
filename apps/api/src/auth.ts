@@ -2,6 +2,7 @@ import { betterAuth } from 'better-auth';
 import { emailOTP } from 'better-auth/plugins';
 import { createDatabasePool } from '@varytra/infrastructure';
 import { z } from 'zod';
+import { createAuthAuditWriter } from './auth-audit.js';
 
 const authConfigSchema = z.object({
   APP_URL: z.url(),
@@ -58,15 +59,47 @@ export function loadAuthConfig(environment: NodeJS.ProcessEnv): AuthConfig {
 }
 
 export function createAuth(config: AuthConfig, emailSender: OtpEmailSender) {
+  const database = createDatabasePool({ connectionString: config.databaseUrl });
+  const audit = createAuthAuditWriter(database);
   const auth = betterAuth({
     baseURL: config.baseUrl,
-    database: createDatabasePool({ connectionString: config.databaseUrl }),
+    database,
     secret: config.secret,
     trustedOrigins: [config.baseUrl, config.appUrl],
     emailAndPassword: {
       enabled: true,
+      onPasswordReset: async ({ user }) => {
+        await audit.write({ action: 'auth.password_reset', userId: user.id });
+      },
       requireEmailVerification: true,
       revokeSessionsOnPasswordReset: true,
+    },
+    emailVerification: {
+      afterEmailVerification: async (user) => {
+        await audit.write({ action: 'auth.email_verified', userId: user.id });
+      },
+    },
+    databaseHooks: {
+      account: {
+        create: {
+          after: async (account) => {
+            await audit.write({
+              action: 'auth.account_linked',
+              providerId: account.providerId,
+              userId: account.userId,
+            });
+          },
+        },
+        delete: {
+          before: async (account) => {
+            await audit.write({
+              action: 'auth.account_unlink_requested',
+              providerId: account.providerId,
+              userId: account.userId,
+            });
+          },
+        },
+      },
     },
     account: {
       accountLinking: {

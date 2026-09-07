@@ -20,7 +20,7 @@ describeDatabase('auth email', () => {
   beforeEach(async () => {
     await runMigrations(connectionString!);
     const database = createDatabasePool({ connectionString: connectionString! });
-    await database.query('TRUNCATE account, session, verification, "user" CASCADE');
+    await database.query('TRUNCATE account_security_events, account, session, verification, "user" CASCADE');
     await database.end();
     sentOtps = [];
     app = buildApp({
@@ -73,6 +73,16 @@ describeDatabase('auth email', () => {
       payload: { email: 'user@example.com', password: 'correct-horse-battery-staple' },
     });
 
+    const database = createDatabasePool({ connectionString: connectionString! });
+    const auditEvents = await database.query<{ readonly action: string }>(
+      'SELECT action FROM account_security_events ORDER BY occurred_at',
+    );
+    await database.end();
+
     expect(signInAfterVerification.statusCode).toBe(200);
+    expect(auditEvents.rows).toEqual([
+      { action: 'auth.account_linked' },
+      { action: 'auth.email_verified' },
+    ]);
   });
 });

@@ -18,6 +18,8 @@ describeDatabase('migrations', () => {
       '002_create_organizations.sql',
       '003_handle_reset_tenant_context.sql',
       '004_create_identity_tables.sql',
+      '005_create_account_security_events.sql',
+      '006_preserve_account_security_audit_events.sql',
     ]);
     expect(migrations.every((migration) => migration.checksum.length === 64)).toBe(true);
   });
@@ -40,6 +42,8 @@ describeDatabase('migrations', () => {
       '002_create_organizations.sql',
       '003_handle_reset_tenant_context.sql',
       '004_create_identity_tables.sql',
+      '005_create_account_security_events.sql',
+      '006_preserve_account_security_audit_events.sql',
     ]);
     expect(roles.rows).toEqual([
       { rolname: 'varytra_app', rolbypassrls: false },
