@@ -7,7 +7,8 @@
     "dev": "docker compose up -d && pnpm --parallel --filter @varytra/web --filter @varytra/api --filter @varytra/worker dev",
     "lint": "eslint .",
     "typecheck": "pnpm -r typecheck",
-    "test": "vitest run"
+    "test": "vitest run",
+    "db:migrate": "tsx packages/infrastructure/src/migrate.ts"
   },
   "type": "module",
   "devDependencies": {
@@ -15,6 +16,7 @@
     "@types/node": "^26.4.1",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
+    "@varytra/infrastructure": "workspace:*",
     "@varytra/runtime": "workspace:*",
     "@varytra/schemas": "workspace:*",
     "eslint": "^10.10.0",
