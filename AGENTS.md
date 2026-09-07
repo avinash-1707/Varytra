@@ -64,3 +64,7 @@
 - Update the source document when implementation changes a documented contract or a deliberate product decision.
 - Run the relevant tests, lint, typecheck, and a security review for changed trust boundaries before dependent work proceeds.
 - Use `pnpm` for dependencies and scripts once the workspace is scaffolded. Verify external-library usage against current official documentation before implementation.
+
+<!-- Added: 2026-09-07 -->
+## Commit Granularity
+Split implementation milestones into independently coherent, buildable commits (for example, reusable foundation plus consuming integration), rather than one commit per milestone. Do not combine an entire build-plan unit into a single commit when it contains separable concerns.
