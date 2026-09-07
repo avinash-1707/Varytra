@@ -2,7 +2,7 @@
 
 **Varytra** is a regression-intelligence platform for stochastic, tool-using AI agents. It compares baseline and candidate runs, localizes material divergence, and produces evidence-backed release decisions.
 
-**Stack:** Vite + React + TypeScript · Fastify + Node.js · PostgreSQL · Redis + BullMQ · S3-compatible storage · Better Auth · OpenTelemetry.
+**Stack:** Vite + React + TypeScript · Fastify + Node.js · PostgreSQL · Redis + BullMQ · Cloudinary · Better Auth · OpenTelemetry.
 
 ## Documentation Availability
 
