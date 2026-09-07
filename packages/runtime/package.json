@@ -1,0 +1,16 @@
+{
+  "name": "@varytra/runtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentelemetry/sdk-node": "^0.222.0",
+    "zod": "^4.5.4"
+  }
+}
