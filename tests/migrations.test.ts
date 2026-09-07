@@ -13,7 +13,10 @@ describeDatabase('migrations', () => {
   it('loads ordered immutable migrations', async () => {
     const migrations = await loadMigrations();
 
-    expect(migrations.map((migration) => migration.name)).toEqual(['001_create_database_roles.sql']);
+    expect(migrations.map((migration) => migration.name)).toEqual([
+      '001_create_database_roles.sql',
+      '002_create_organizations.sql',
+    ]);
     expect(migrations.every((migration) => migration.checksum.length === 64)).toBe(true);
   });
 
@@ -25,12 +28,19 @@ describeDatabase('migrations', () => {
     const roles = await database.query<{ readonly rolname: string; readonly rolbypassrls: boolean }>(
       "SELECT rolname, rolbypassrls FROM pg_roles WHERE rolname IN ('varytra_app', 'varytra_migrator') ORDER BY rolname",
     );
+    const organizationOwner = await database.query<{ readonly owner: string }>(
+      "SELECT pg_get_userbyid(relowner) AS owner FROM pg_class WHERE oid = 'organizations'::regclass",
+    );
     await database.end();
 
-    expect(migrations.rows.map((migration) => migration.name)).toEqual(['001_create_database_roles.sql']);
+    expect(migrations.rows.map((migration) => migration.name)).toEqual([
+      '001_create_database_roles.sql',
+      '002_create_organizations.sql',
+    ]);
     expect(roles.rows).toEqual([
       { rolname: 'varytra_app', rolbypassrls: false },
       { rolname: 'varytra_migrator', rolbypassrls: true },
     ]);
+    expect(organizationOwner.rows).toEqual([{ owner: 'varytra_migrator' }]);
   });
 });
