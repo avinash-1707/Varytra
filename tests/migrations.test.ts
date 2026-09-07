@@ -16,6 +16,7 @@ describeDatabase('migrations', () => {
     expect(migrations.map((migration) => migration.name)).toEqual([
       '001_create_database_roles.sql',
       '002_create_organizations.sql',
+      '003_handle_reset_tenant_context.sql',
     ]);
     expect(migrations.every((migration) => migration.checksum.length === 64)).toBe(true);
   });
@@ -36,6 +37,7 @@ describeDatabase('migrations', () => {
     expect(migrations.rows.map((migration) => migration.name)).toEqual([
       '001_create_database_roles.sql',
       '002_create_organizations.sql',
+      '003_handle_reset_tenant_context.sql',
     ]);
     expect(roles.rows).toEqual([
       { rolname: 'varytra_app', rolbypassrls: false },

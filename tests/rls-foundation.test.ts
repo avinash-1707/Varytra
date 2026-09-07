@@ -62,11 +62,18 @@ describeDatabase('rls foundation', () => {
   it('clears tenant context and application role when a pooled connection is released', async () => {
     const database = pool!;
     await withOrganizationTransaction(database, firstOrganizationId, async () => undefined);
+    const withoutContextClient = await database.connect();
+    await withoutContextClient.query('BEGIN');
+    await withoutContextClient.query('SET LOCAL ROLE varytra_app');
+    const withoutContext = await withoutContextClient.query<{ readonly id: string }>('SELECT id FROM organizations');
+    await withoutContextClient.query('ROLLBACK');
+    withoutContextClient.release();
     const result = await database.query<{ readonly organizationId: string | null; readonly role: string }>(
       "SELECT current_setting('app.organization_id', true) AS \"organizationId\", current_user AS role",
     );
 
-    expect(result.rows[0]?.organizationId).toBeNull();
+    expect(withoutContext.rows).toEqual([]);
+    expect(result.rows[0]?.organizationId).toBe('');
     expect(result.rows[0]?.role).not.toBe('varytra_app');
   });
 });
