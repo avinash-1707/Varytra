@@ -20,6 +20,8 @@ describeDatabase('migrations', () => {
       '004_create_identity_tables.sql',
       '005_create_account_security_events.sql',
       '006_preserve_account_security_audit_events.sql',
+      '007_create_artifact_tombstones.sql',
+      '008_handle_reset_artifact_tombstone_context.sql',
     ]);
     expect(migrations.every((migration) => migration.checksum.length === 64)).toBe(true);
   });
@@ -44,6 +46,8 @@ describeDatabase('migrations', () => {
       '004_create_identity_tables.sql',
       '005_create_account_security_events.sql',
       '006_preserve_account_security_audit_events.sql',
+      '007_create_artifact_tombstones.sql',
+      '008_handle_reset_artifact_tombstone_context.sql',
     ]);
     expect(roles.rows).toEqual([
       { rolname: 'varytra_app', rolbypassrls: false },

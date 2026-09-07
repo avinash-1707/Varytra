@@ -14,7 +14,7 @@ describeDatabase('rls foundation', () => {
   beforeAll(async () => {
     await runMigrations(connectionString!);
     const database = createDatabasePool({ connectionString: connectionString! });
-    await database.query('TRUNCATE organizations');
+    await database.query('TRUNCATE organizations CASCADE');
     await database.query(
       'INSERT INTO organizations (id, name) VALUES ($1, $2), ($3, $4)',
       [firstOrganizationId, 'First organization', secondOrganizationId, 'Second organization'],
@@ -75,5 +75,32 @@ describeDatabase('rls foundation', () => {
     expect(withoutContext.rows).toEqual([]);
     expect(result.rows[0]?.organizationId).toBe('');
     expect(result.rows[0]?.role).not.toBe('varytra_app');
+  });
+
+  it('default-denies and isolates artifact retention tombstones', async () => {
+    const database = pool!;
+    await withOrganizationTransaction(database, firstOrganizationId, async (client) => {
+      await client.query(
+        `INSERT INTO artifact_tombstones (organization_id, object_key, content_hash, retention_deadline)
+         VALUES ($1, $2, $3, now())`,
+        [firstOrganizationId, 'org/first/report.json', 'a'.repeat(64)],
+      );
+    });
+    const withoutContextClient = await database.connect();
+    await withoutContextClient.query('BEGIN');
+    await withoutContextClient.query('SET LOCAL ROLE varytra_app');
+    const withoutContext = await withoutContextClient.query('SELECT 1 FROM artifact_tombstones');
+    await withoutContextClient.query('ROLLBACK');
+    withoutContextClient.release();
+
+    await expect(withOrganizationTransaction(database, firstOrganizationId, async (client) => {
+      await client.query(
+        `INSERT INTO artifact_tombstones (organization_id, object_key, content_hash, retention_deadline)
+         VALUES ($1, $2, $3, now())`,
+        [secondOrganizationId, 'org/second/report.json', 'b'.repeat(64)],
+      );
+    })).rejects.toMatchObject({ code: '42501' });
+
+    expect(withoutContext.rows).toEqual([]);
   });
 });
