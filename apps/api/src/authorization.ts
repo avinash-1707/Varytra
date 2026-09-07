@@ -21,7 +21,7 @@ const roleCapabilities: Readonly<Record<OrganizationRole, readonly Capability[]>
 };
 
 export class AuthorizationError extends Error {
-  public constructor(public readonly code: 'active_organization_required' | 'forbidden' | 'invalid_credentials' | 'not_found') {
+  public constructor(public readonly code: 'active_organization_required' | 'forbidden' | 'invalid_credentials' | 'invalid_request' | 'not_found') {
     super(code);
     this.name = 'AuthorizationError';
   }
@@ -42,6 +42,9 @@ export interface Membership {
 export async function resolveMembership(pool: Pool, userId: string, organizationId: string | undefined): Promise<Membership> {
   if (organizationId === undefined) {
     throw new AuthorizationError('active_organization_required');
+  }
+  if (!uuidPattern.test(organizationId)) {
+    throw new AuthorizationError('invalid_request');
   }
   const result = await pool.query<Membership>(
     'SELECT organization_id AS "organizationId", user_id AS "userId", role FROM resolve_organization_membership($1, $2)',

@@ -104,8 +104,12 @@ export function buildApp(options: BuildAppOptions = {}) {
     });
 
     function authorizationReply(error: AuthorizationError, reply: { status: (code: number) => { send: (body: unknown) => unknown } }): unknown {
-      const status = error.code === 'invalid_credentials' ? 401 : error.code === 'active_organization_required' ? 409 : error.code === 'forbidden' ? 403 : 404;
+      const status = error.code === 'invalid_credentials' ? 401 : error.code === 'invalid_request' ? 400 : error.code === 'active_organization_required' ? 409 : error.code === 'forbidden' ? 403 : 404;
       return reply.status(status).send({ error: error.code });
+    }
+
+    function isUuid(value: string | undefined): value is string {
+      return value !== undefined && z.uuid().safeParse(value).success;
     }
 
     async function authenticatedUser(request: { readonly headers: Record<string, string | string[] | undefined> }): Promise<string> {
@@ -247,7 +251,7 @@ export function buildApp(options: BuildAppOptions = {}) {
       try {
         const body = apiKeySchema.safeParse(request.body);
         const projectId = (request.params as { readonly projectId?: string }).projectId;
-        if (!body.success || projectId === undefined) {
+        if (!body.success || !isUuid(projectId)) {
           return reply.status(400).send({ error: 'invalid_request' });
         }
         const membership = await authenticatedMembership(request);
@@ -269,14 +273,15 @@ export function buildApp(options: BuildAppOptions = {}) {
     app.get('/v1/projects/:projectId/api-keys', async (request, reply) => {
       try {
         const projectId = (request.params as { readonly projectId?: string }).projectId;
-        if (projectId === undefined) return reply.status(400).send({ error: 'invalid_request' });
+        if (!isUuid(projectId)) return reply.status(400).send({ error: 'invalid_request' });
         const membership = await authenticatedMembership(request);
-        authorize(membership, 'api_keys:create');
+        let ownKeysOnly = false;
+        try { authorize(membership, 'api_keys:manage_any'); } catch { requireCapability(membership.role, 'api_keys:manage_own'); ownKeysOnly = true; }
         const keys = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
           const result = await client.query(
             `SELECT id, name, scopes, expires_at AS "expiresAt", revoked_at AS "revokedAt", replaced_by AS "replacedBy", last_used_at AS "lastUsedAt", created_at AS "createdAt"
-             FROM api_keys WHERE project_id = $1 ORDER BY created_at DESC`,
-            [projectId],
+             FROM api_keys WHERE project_id = $1 ${ownKeysOnly ? 'AND created_by_user_id = $2' : ''} ORDER BY created_at DESC`,
+            ownKeysOnly ? [projectId, membership.userId] : [projectId],
           );
           return result.rows;
         });
@@ -291,7 +296,7 @@ export function buildApp(options: BuildAppOptions = {}) {
       try {
         const projectId = (request.params as { readonly projectId?: string }).projectId;
         const keyId = (request.params as { readonly keyId?: string }).keyId;
-        if (projectId === undefined || keyId === undefined) {
+        if (!isUuid(projectId) || !isUuid(keyId)) {
           return reply.status(400).send({ error: 'invalid_request' });
         }
         const membership = await authenticatedMembership(request);
@@ -301,7 +306,8 @@ export function buildApp(options: BuildAppOptions = {}) {
           if (key === undefined) throw new AuthorizationError('not_found');
           try { authorize(membership, 'api_keys:manage_any'); } catch { requireCapability(membership.role, 'api_keys:manage_own'); if (key.createdByUserId !== membership.userId) throw new AuthorizationError('forbidden'); }
           if (revoke) {
-            await client.query('UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL', [keyId]);
+            const revoked = await client.query('UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL', [keyId]);
+            if (revoked.rowCount !== 1) throw new AuthorizationError('not_found');
             await writeAuditEvent(client, { organizationId: membership.organizationId, actorType: 'user', actorId: membership.userId, action: 'api_key.revoked', targetType: 'api_key', targetId: keyId });
           }
           return key;
@@ -320,7 +326,7 @@ export function buildApp(options: BuildAppOptions = {}) {
       try {
         const projectId = (request.params as { readonly projectId?: string }).projectId;
         const keyId = (request.params as { readonly keyId?: string }).keyId;
-        if (projectId === undefined || keyId === undefined) return reply.status(400).send({ error: 'invalid_request' });
+        if (!isUuid(projectId) || !isUuid(keyId)) return reply.status(400).send({ error: 'invalid_request' });
         const membership = await authenticatedMembership(request);
         const existing = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
           const result = await client.query<Readonly<{ createdByUserId: string }>>('SELECT created_by_user_id AS "createdByUserId" FROM api_keys WHERE id = $1 AND project_id = $2', [keyId, projectId]);
@@ -350,7 +356,7 @@ export function buildApp(options: BuildAppOptions = {}) {
           return { principal: { api_key_id: principal.apiKeyId, organization_id: principal.organizationId, project_id: principal.projectId, scopes: principal.scopes } };
         } catch (error) {
           if (error instanceof AuthorizationError) {
-            const status = error.code === 'invalid_credentials' ? 401 : error.code === 'forbidden' ? 403 : 404;
+            const status = error.code === 'invalid_credentials' ? 401 : error.code === 'invalid_request' ? 400 : error.code === 'forbidden' ? 403 : 404;
             return reply.status(status).send({ error: error.code });
           }
           throw error;
