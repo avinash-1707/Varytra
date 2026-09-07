@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createDatabasePool, runMigrations, withOrganizationTransaction } from '@varytra/infrastructure';
+import { createDatabasePool, withOrganizationTransaction } from '@varytra/infrastructure';
+import { runMigrations } from '@varytra/infrastructure/migrate';
 
 const connectionString = process.env.DATABASE_URL;
 const describeDatabase = connectionString === undefined ? describe.skip : describe;
