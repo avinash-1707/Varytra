@@ -17,6 +17,7 @@ describeDatabase('migrations', () => {
       '001_create_database_roles.sql',
       '002_create_organizations.sql',
       '003_handle_reset_tenant_context.sql',
+      '004_create_identity_tables.sql',
     ]);
     expect(migrations.every((migration) => migration.checksum.length === 64)).toBe(true);
   });
@@ -38,6 +39,7 @@ describeDatabase('migrations', () => {
       '001_create_database_roles.sql',
       '002_create_organizations.sql',
       '003_handle_reset_tenant_context.sql',
+      '004_create_identity_tables.sql',
     ]);
     expect(roles.rows).toEqual([
       { rolname: 'varytra_app', rolbypassrls: false },
