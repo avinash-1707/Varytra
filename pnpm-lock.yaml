@@ -50,6 +50,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@varytra/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
       fastify:
         specifier: ^5.12.3
         version: 5.12.3
@@ -76,7 +79,11 @@ importers:
         specifier: ^7.1.7
         version: 7.3.6(@types/node@26.4.1)(tsx@4.23.13)(yaml@2.9.0)
 
-  apps/worker: {}
+  apps/worker:
+    dependencies:
+      '@varytra/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
 
   packages/runtime:
     dependencies:

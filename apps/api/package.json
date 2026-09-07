@@ -4,10 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/main.ts",
+    "dev": "NODE_ENV=development SERVICE_NAME=varytra-api tsx watch src/main.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@varytra/runtime": "workspace:*",
     "fastify": "^5.12.3"
   }
 }
