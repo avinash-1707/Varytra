@@ -1,15 +1,6 @@
 import { Pool, type PoolClient } from 'pg';
 import { createHash } from 'node:crypto';
-import {
-  DeleteObjectCommand,
-  GetObjectCommand,
-  HeadObjectCommand,
-  ListObjectVersionsCommand,
-  DeleteObjectsCommand,
-  PutObjectCommand,
-  S3Client,
-} from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { v2 as cloudinary } from 'cloudinary';
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -84,16 +75,11 @@ export interface ArtifactStorageTransport {
     key: string;
     content: Uint8Array;
     metadata: Readonly<Record<string, string>>;
-    encryption: ArtifactEncryption;
   }>) => Promise<void>;
   readonly readMetadata: (key: string) => Promise<Readonly<Record<string, string>> | undefined>;
   readonly signRead: (key: string, expiresInSeconds: number) => Promise<string>;
   readonly delete: (key: string) => Promise<void>;
 }
-
-export type ArtifactEncryption =
-  | Readonly<{ readonly mode: 's3' }>
-  | Readonly<{ readonly mode: 'kms'; readonly keyId: string }>;
 
 export interface ArtifactTombstone {
   readonly organizationId: string;
@@ -191,7 +177,6 @@ function assertHash(contentHash: string): void {
 export function createArtifactStorage(
   transport: ArtifactStorageTransport,
   tombstones: ArtifactTombstoneStore,
-  encryption: ArtifactEncryption = { mode: 's3' },
 ): ArtifactStorage {
   return {
     async write(input) {
@@ -211,7 +196,7 @@ export function createArtifactStorage(
         retention_deadline: input.retentionDeadline.toISOString(),
         schema_version: input.schemaVersion,
       };
-      await transport.write({ key, content: input.content, metadata, encryption });
+      await transport.write({ key, content: input.content, metadata });
       const storedMetadata = await transport.readMetadata(key);
 
       if (storedMetadata?.content_hash !== contentHash) {
@@ -259,67 +244,133 @@ export function createArtifactStorage(
   };
 }
 
-export interface S3ArtifactStorageConfig {
-  readonly bucket: string;
-  readonly region: string;
-  readonly accessKeyId: string;
-  readonly secretAccessKey: string;
-  readonly endpoint?: string;
-  readonly encryption?: ArtifactEncryption;
+export interface CloudinaryArtifactStorageConfig {
+  readonly cloudName: string;
+  readonly apiKey: string;
+  readonly apiSecret: string;
 }
 
-export function createS3ArtifactStorage(
-  config: S3ArtifactStorageConfig,
+interface CloudinaryUploadResult {
+  readonly public_id: string;
+  readonly context: unknown;
+}
+
+export interface CloudinaryArtifactClient {
+  readonly config: (config: Readonly<{
+    cloud_name: string;
+    api_key: string;
+    api_secret: string;
+  }>) => unknown;
+  readonly uploader: Readonly<{
+    upload: (file: string, options: Readonly<{
+      resource_type: 'raw';
+      type: 'authenticated';
+      public_id: string;
+      overwrite: false;
+      unique_filename: false;
+      context: Readonly<Record<string, string>>;
+    }>) => Promise<CloudinaryUploadResult>;
+    destroy: (publicId: string, options: Readonly<{
+      resource_type: 'raw';
+      type: 'authenticated';
+      invalidate: true;
+    }>) => Promise<unknown>;
+  }>;
+  readonly utils: Readonly<{
+    private_download_url: (publicId: string, format: string, options: Readonly<{
+      resource_type: 'raw';
+      type: 'authenticated';
+      expires_at: number;
+      attachment: true;
+    }>) => string;
+  }>;
+}
+
+function cloudinaryContext(context: unknown): Readonly<Record<string, string>> | undefined {
+  if (typeof context !== 'object' || context === null || Array.isArray(context)) {
+    return undefined;
+  }
+
+  const custom = (context as Readonly<Record<string, unknown>>).custom;
+  const values = custom === undefined ? context : custom;
+
+  if (typeof values !== 'object' || values === null || Array.isArray(values)) {
+    return undefined;
+  }
+
+  const entries = Object.entries(values);
+  if (entries.some(([, value]) => typeof value !== 'string')) {
+    return undefined;
+  }
+
+  return Object.fromEntries(entries) as Readonly<Record<string, string>>;
+}
+
+function artifactFormat(key: string): string {
+  const extension = key.split('.').at(-1);
+  if (extension === undefined || !/^[a-z0-9]+$/.test(extension)) {
+    throw new ArtifactAccessError('Artifact key must include a file extension');
+  }
+
+  return extension;
+}
+
+export function createCloudinaryArtifactStorage(
+  config: CloudinaryArtifactStorageConfig,
   tombstones: ArtifactTombstoneStore,
+  client: CloudinaryArtifactClient = cloudinary,
 ): ArtifactStorage {
-  const client = new S3Client({
-    region: config.region,
-    credentials: {
-      accessKeyId: config.accessKeyId,
-      secretAccessKey: config.secretAccessKey,
-    },
-    ...(config.endpoint === undefined ? {} : { endpoint: config.endpoint, forcePathStyle: true }),
+  client.config({
+    cloud_name: config.cloudName,
+    api_key: config.apiKey,
+    api_secret: config.apiSecret,
   });
-  const encryption = config.encryption ?? { mode: 's3' };
+  const metadata = new Map<string, Readonly<Record<string, string>>>();
   const transport: ArtifactStorageTransport = {
     async write(input) {
-      await client.send(new PutObjectCommand({
-        Bucket: config.bucket,
-        Key: input.key,
-        Body: input.content,
-        Metadata: input.metadata,
-        IfNoneMatch: '*',
-        ...(input.encryption.mode === 'kms'
-          ? { ServerSideEncryption: 'aws:kms', SSEKMSKeyId: input.encryption.keyId }
-          : { ServerSideEncryption: 'AES256' }),
-      }));
+      const response = await client.uploader.upload(
+        `data:application/octet-stream;base64,${Buffer.from(input.content).toString('base64')}`,
+        {
+          resource_type: 'raw',
+          type: 'authenticated',
+          public_id: input.key,
+          overwrite: false,
+          unique_filename: false,
+          context: input.metadata,
+        },
+      );
+
+      if (response.public_id !== input.key) {
+        throw new ArtifactAccessError('Cloudinary returned an unexpected artifact public ID');
+      }
+
+      const storedMetadata = cloudinaryContext(response.context);
+      if (storedMetadata === undefined) {
+        throw new ArtifactAccessError('Cloudinary did not return artifact context metadata');
+      }
+
+      metadata.set(input.key, storedMetadata);
     },
     async readMetadata(key) {
-      const response = await client.send(new HeadObjectCommand({ Bucket: config.bucket, Key: key }));
-      return response.Metadata;
+      return metadata.get(key);
     },
     async signRead(key, expiresInSeconds) {
-      return getSignedUrl(client, new GetObjectCommand({ Bucket: config.bucket, Key: key }), {
-        expiresIn: expiresInSeconds,
+      return client.utils.private_download_url(key, artifactFormat(key), {
+        resource_type: 'raw',
+        type: 'authenticated',
+        expires_at: Math.floor(Date.now() / 1000) + expiresInSeconds,
+        attachment: true,
       });
     },
     async delete(key) {
-      const versions = await client.send(new ListObjectVersionsCommand({ Bucket: config.bucket, Prefix: key }));
-      const objects = [...(versions.Versions ?? []), ...(versions.DeleteMarkers ?? [])]
-        .filter((version) => version.Key === key && version.VersionId !== undefined)
-        .map((version) => ({ Key: key, VersionId: version.VersionId! }));
-
-      if (objects.length === 0) {
-        await client.send(new DeleteObjectCommand({ Bucket: config.bucket, Key: key }));
-        return;
-      }
-
-      await client.send(new DeleteObjectsCommand({
-        Bucket: config.bucket,
-        Delete: { Objects: objects, Quiet: true },
-      }));
+      await client.uploader.destroy(key, {
+        resource_type: 'raw',
+        type: 'authenticated',
+        invalidate: true,
+      });
+      metadata.delete(key);
     },
   };
 
-  return createArtifactStorage(transport, tombstones, encryption);
+  return createArtifactStorage(transport, tombstones);
 }

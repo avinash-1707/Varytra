@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   ArtifactAccessError,
+  createCloudinaryArtifactStorage,
   createArtifactStorage,
+  type CloudinaryArtifactClient,
   type ArtifactStorageTransport,
   type ArtifactTombstoneStore,
 } from '@varytra/infrastructure';
@@ -81,5 +83,64 @@ describe('artifacts', () => {
       retentionDeadline: new Date('2026-12-31T00:00:00.000Z'),
       creatorId: 'user-a',
     })).rejects.toBeInstanceOf(ArtifactAccessError);
+  });
+
+  it('uses authenticated raw Cloudinary assets with context-only metadata', async () => {
+    let uploadOptions: Readonly<Record<string, unknown>> | undefined;
+    let destroyedPublicId: string | undefined;
+    const client: CloudinaryArtifactClient = {
+      config() {},
+      uploader: {
+        async upload(_, options) {
+          uploadOptions = options;
+          return { public_id: options.public_id, context: { custom: options.context } };
+        },
+        async destroy(publicId, options) {
+          destroyedPublicId = publicId;
+          expect(options).toEqual({ resource_type: 'raw', type: 'authenticated', invalidate: true });
+        },
+      },
+      utils: {
+        private_download_url(publicId, format, options) {
+          expect(format).toBe('jsonl');
+          expect(options).toMatchObject({ resource_type: 'raw', type: 'authenticated', attachment: true });
+          return `https://cloudinary.example.test/${publicId}?expires_at=${options.expires_at}`;
+        },
+      },
+    };
+    const storage = createCloudinaryArtifactStorage({
+      cloudName: 'varytra-test',
+      apiKey: 'key',
+      apiSecret: 'secret',
+    }, tombstones, client);
+    const artifact = await storage.write({
+      owner: { organizationId, projectId: 'project-a', batchId: 'batch-a', runId: 'run-a' },
+      kind: 'raw-trace',
+      content: new TextEncoder().encode('{"event":"raw"}\n'),
+      schemaVersion: '1',
+      classification: 'restricted',
+      retentionDeadline: new Date('2026-12-31T00:00:00.000Z'),
+      creatorId: 'user-a',
+    });
+
+    expect(uploadOptions).toMatchObject({
+      resource_type: 'raw',
+      type: 'authenticated',
+      public_id: artifact.key,
+      overwrite: false,
+      unique_filename: false,
+      context: { content_hash: artifact.contentHash },
+    });
+    await expect(storage.getSignedReadUrl({
+      requesterOrganizationId: organizationId,
+      artifact: { owner: artifact.owner, kind: artifact.kind, contentHash: artifact.contentHash },
+      expiresInSeconds: 60,
+    })).resolves.toContain('expires_at=');
+    await storage.deleteExpired(
+      { owner: artifact.owner, kind: artifact.kind, contentHash: artifact.contentHash },
+      new Date('2027-01-01T00:00:00.000Z'),
+      new Date('2026-12-31T00:00:00.000Z'),
+    );
+    expect(destroyedPublicId).toBe(artifact.key);
   });
 });
