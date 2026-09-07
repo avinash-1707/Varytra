@@ -3,7 +3,22 @@ import { fromNodeHeaders } from 'better-auth/node';
 import { createLogger, runWithLogContext, serializeError, type Logger } from '@varytra/runtime';
 import type { Pool } from 'pg';
 import { withOrganizationTransaction } from '@varytra/infrastructure';
-import { resolveMembership, AuthorizationError, requireCapability, type Capability, type Membership } from './authorization.js';
+import { z } from 'zod';
+import {
+  authenticateCiPrincipal,
+  changeMembership,
+  createOrganization,
+  issueApiKey,
+  listOrganizations,
+  resolveMembership,
+  rotateApiKey,
+  AuthorizationError,
+  requireCapability,
+  writeAuditEvent,
+  type ApiKeyScope,
+  type Capability,
+  type Membership,
+} from './authorization.js';
 
 export interface AuthHandler {
   readonly handler: (request: Request) => Promise<Response>;
@@ -80,11 +95,29 @@ export function buildApp(options: BuildAppOptions = {}) {
   }
 
   if (options.auth?.getSessionUserId !== undefined && options.database !== undefined) {
-    async function authenticatedMembership(request: { readonly headers: Record<string, string | string[] | undefined> }): Promise<Membership> {
+    const organizationSchema = z.object({ name: z.string().trim().min(1).max(200) });
+    const membershipSchema = z.object({ role: z.enum(['owner', 'admin', 'editor', 'viewer']) });
+    const apiKeySchema = z.object({
+      expires_at: z.coerce.date().refine((date) => date > new Date(), 'must be in the future'),
+      name: z.string().trim().min(1).max(100),
+      scopes: z.array(z.enum(['ci:read', 'ci:write'])).min(1),
+    });
+
+    function authorizationReply(error: AuthorizationError, reply: { status: (code: number) => { send: (body: unknown) => unknown } }): unknown {
+      const status = error.code === 'invalid_credentials' ? 401 : error.code === 'active_organization_required' ? 409 : error.code === 'forbidden' ? 403 : 404;
+      return reply.status(status).send({ error: error.code });
+    }
+
+    async function authenticatedUser(request: { readonly headers: Record<string, string | string[] | undefined> }): Promise<string> {
       const userId = await options.auth!.getSessionUserId!(fromNodeHeaders(request.headers));
       if (userId === undefined) {
         throw new AuthorizationError('invalid_credentials');
       }
+      return userId;
+    }
+
+    async function authenticatedMembership(request: { readonly headers: Record<string, string | string[] | undefined> }): Promise<Membership> {
+      const userId = await authenticatedUser(request);
       const selectedOrganization = request.headers['x-varytra-organization'];
       const organizationId = Array.isArray(selectedOrganization) ? selectedOrganization[0] : selectedOrganization;
 
@@ -101,7 +134,34 @@ export function buildApp(options: BuildAppOptions = {}) {
         return { organization_id: membership.organizationId, role: membership.role };
       } catch (error) {
         if (error instanceof AuthorizationError) {
-          return reply.status(error.code === 'invalid_credentials' ? 401 : error.code === 'active_organization_required' ? 409 : 404).send({ error: error.code });
+          return authorizationReply(error, reply);
+        }
+        throw error;
+      }
+    });
+
+    app.post('/v1/organizations', async (request, reply) => {
+      try {
+        const parsed = organizationSchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.status(400).send({ error: 'invalid_request' });
+        }
+        const organization = await createOrganization(options.database!, { name: parsed.data.name, ownerId: await authenticatedUser(request) });
+        return reply.status(201).send({ organization });
+      } catch (error) {
+        if (error instanceof AuthorizationError) {
+          return authorizationReply(error, reply);
+        }
+        throw error;
+      }
+    });
+
+    app.get('/v1/organizations', async (request, reply) => {
+      try {
+        return { organizations: await listOrganizations(options.database!, await authenticatedUser(request)) };
+      } catch (error) {
+        if (error instanceof AuthorizationError) {
+          return authorizationReply(error, reply);
         }
         throw error;
       }
@@ -121,10 +181,181 @@ export function buildApp(options: BuildAppOptions = {}) {
         return { members };
       } catch (error) {
         if (error instanceof AuthorizationError) {
-          return reply.status(error.code === 'invalid_credentials' ? 401 : error.code === 'active_organization_required' ? 409 : error.code === 'forbidden' ? 403 : 404).send({ error: error.code });
+          return authorizationReply(error, reply);
         }
         throw error;
       }
+    });
+
+    app.put('/v1/organization/members/:userId', async (request, reply) => {
+      try {
+        const userId = (request.params as { readonly userId?: string }).userId;
+        const body = membershipSchema.safeParse(request.body);
+        if (!body.success || userId === undefined || userId.length === 0) {
+          return reply.status(400).send({ error: 'invalid_request' });
+        }
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'members:write');
+        await changeMembership(options.database!, { actor: membership, targetUserId: userId, role: body.data.role });
+        return reply.status(204).send();
+      } catch (error) {
+        if (error instanceof AuthorizationError) {
+          return authorizationReply(error, reply);
+        }
+        throw error;
+      }
+    });
+
+    app.delete('/v1/organization/members/:userId', async (request, reply) => {
+      try {
+        const userId = (request.params as { readonly userId?: string }).userId;
+        if (userId === undefined || userId.length === 0) {
+          return reply.status(400).send({ error: 'invalid_request' });
+        }
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'members:write');
+        await changeMembership(options.database!, { actor: membership, targetUserId: userId });
+        return reply.status(204).send();
+      } catch (error) {
+        if (error instanceof AuthorizationError) {
+          return authorizationReply(error, reply);
+        }
+        throw error;
+      }
+    });
+
+    app.get('/v1/organization/audit-events', async (request, reply) => {
+      try {
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'audit:read');
+        const events = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          const result = await client.query(
+            `SELECT id, actor_type AS "actorType", actor_id AS "actorId", action, target_type AS "targetType", target_id AS "targetId", occurred_at AS "occurredAt"
+             FROM audit_events WHERE organization_id = $1 ORDER BY occurred_at DESC, id DESC`,
+            [membership.organizationId],
+          );
+          return result.rows;
+        });
+        return { events };
+      } catch (error) {
+        if (error instanceof AuthorizationError) return authorizationReply(error, reply);
+        throw error;
+      }
+    });
+
+    app.post('/v1/projects/:projectId/api-keys', async (request, reply) => {
+      try {
+        const body = apiKeySchema.safeParse(request.body);
+        const projectId = (request.params as { readonly projectId?: string }).projectId;
+        if (!body.success || projectId === undefined) {
+          return reply.status(400).send({ error: 'invalid_request' });
+        }
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'api_keys:create');
+        const project = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => client.query('SELECT 1 FROM projects WHERE id = $1', [projectId]));
+        if (project.rowCount !== 1) {
+          throw new AuthorizationError('not_found');
+        }
+        const apiKey = await issueApiKey(options.database!, { organizationId: membership.organizationId, projectId, createdByUserId: membership.userId, name: body.data.name, scopes: body.data.scopes as readonly ApiKeyScope[], expiresAt: body.data.expires_at });
+        return reply.status(201).send({ api_key: apiKey });
+      } catch (error) {
+        if (error instanceof AuthorizationError) {
+          return authorizationReply(error, reply);
+        }
+        throw error;
+      }
+    });
+
+    app.get('/v1/projects/:projectId/api-keys', async (request, reply) => {
+      try {
+        const projectId = (request.params as { readonly projectId?: string }).projectId;
+        if (projectId === undefined) return reply.status(400).send({ error: 'invalid_request' });
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'api_keys:create');
+        const keys = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          const result = await client.query(
+            `SELECT id, name, scopes, expires_at AS "expiresAt", revoked_at AS "revokedAt", replaced_by AS "replacedBy", last_used_at AS "lastUsedAt", created_at AS "createdAt"
+             FROM api_keys WHERE project_id = $1 ORDER BY created_at DESC`,
+            [projectId],
+          );
+          return result.rows;
+        });
+        return { api_keys: keys };
+      } catch (error) {
+        if (error instanceof AuthorizationError) return authorizationReply(error, reply);
+        throw error;
+      }
+    });
+
+    async function manageApiKey(request: { readonly headers: Record<string, string | string[] | undefined>; readonly params: unknown }, reply: { status: (code: number) => { send: (body: unknown) => unknown } }, revoke: boolean): Promise<unknown> {
+      try {
+        const projectId = (request.params as { readonly projectId?: string }).projectId;
+        const keyId = (request.params as { readonly keyId?: string }).keyId;
+        if (projectId === undefined || keyId === undefined) {
+          return reply.status(400).send({ error: 'invalid_request' });
+        }
+        const membership = await authenticatedMembership(request);
+        const apiKey = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          const result = await client.query<Readonly<{ createdByUserId: string }>>('SELECT created_by_user_id AS "createdByUserId" FROM api_keys WHERE id = $1 AND project_id = $2 FOR UPDATE', [keyId, projectId]);
+          const key = result.rows[0];
+          if (key === undefined) throw new AuthorizationError('not_found');
+          try { authorize(membership, 'api_keys:manage_any'); } catch { requireCapability(membership.role, 'api_keys:manage_own'); if (key.createdByUserId !== membership.userId) throw new AuthorizationError('forbidden'); }
+          if (revoke) {
+            await client.query('UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL', [keyId]);
+            await writeAuditEvent(client, { organizationId: membership.organizationId, actorType: 'user', actorId: membership.userId, action: 'api_key.revoked', targetType: 'api_key', targetId: keyId });
+          }
+          return key;
+        });
+        if (revoke) return reply.status(204).send('');
+        return { api_key: apiKey };
+      } catch (error) {
+        if (error instanceof AuthorizationError) return authorizationReply(error, reply);
+        throw error;
+      }
+    }
+
+    app.delete('/v1/projects/:projectId/api-keys/:keyId', async (request, reply) => manageApiKey(request, reply, true));
+
+    app.post('/v1/projects/:projectId/api-keys/:keyId/rotate', async (request, reply) => {
+      try {
+        const projectId = (request.params as { readonly projectId?: string }).projectId;
+        const keyId = (request.params as { readonly keyId?: string }).keyId;
+        if (projectId === undefined || keyId === undefined) return reply.status(400).send({ error: 'invalid_request' });
+        const membership = await authenticatedMembership(request);
+        const existing = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          const result = await client.query<Readonly<{ createdByUserId: string }>>('SELECT created_by_user_id AS "createdByUserId" FROM api_keys WHERE id = $1 AND project_id = $2', [keyId, projectId]);
+          return result.rows[0];
+        });
+        if (existing === undefined) throw new AuthorizationError('not_found');
+        try { authorize(membership, 'api_keys:manage_any'); } catch { requireCapability(membership.role, 'api_keys:manage_own'); if (existing.createdByUserId !== membership.userId) throw new AuthorizationError('forbidden'); }
+        const apiKey = await rotateApiKey(options.database!, { actorId: membership.userId, keyId, organizationId: membership.organizationId, projectId });
+        return reply.status(201).send({ api_key: apiKey });
+      } catch (error) {
+        if (error instanceof AuthorizationError) return authorizationReply(error, reply);
+        throw error;
+      }
+    });
+  }
+
+  if (options.database !== undefined) {
+    app.route({
+      method: ['GET', 'POST'],
+      url: '/v1/ci/authorization',
+      handler: async (request, reply) => {
+        const authorization = request.headers.authorization;
+        const token = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : undefined;
+        if (token === undefined || token.length === 0) return reply.status(401).send({ error: 'invalid_credentials' });
+        try {
+          const principal = await authenticateCiPrincipal(options.database!, token, request.method === 'GET' ? 'ci:read' : 'ci:write');
+          return { principal: { api_key_id: principal.apiKeyId, organization_id: principal.organizationId, project_id: principal.projectId, scopes: principal.scopes } };
+        } catch (error) {
+          if (error instanceof AuthorizationError) {
+            const status = error.code === 'invalid_credentials' ? 401 : error.code === 'forbidden' ? 403 : 404;
+            return reply.status(status).send({ error: error.code });
+          }
+          throw error;
+        }
+      },
     });
   }
 
