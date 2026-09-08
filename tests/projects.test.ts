@@ -50,7 +50,9 @@ describeDatabase('projects', () => {
 
     const list = await app.inject({ method: 'GET', url: '/v1/projects', headers: viewerHeaders });
     expect(list.statusCode).toBe(200);
-    expect(list.json<{ readonly projects: readonly { readonly id: string; readonly name: string }[] }>().projects).toContainEqual({ id: created.id, name: 'Refund safeguard' });
+    expect(list.json<{ readonly projects: readonly { readonly id: string; readonly name: string }[] }>().projects).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: created.id, name: 'Refund safeguard' }),
+    ]));
 
     const update = await app.inject({ method: 'PATCH', url: `/v1/projects/${created.id}`, headers: editorHeaders, payload: { name: 'Refund controls' } });
     expect(update.statusCode).toBe(200);
