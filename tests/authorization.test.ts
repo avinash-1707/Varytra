@@ -4,12 +4,12 @@ import { AuthorizationError, requireCapability } from '../apps/api/src/authoriza
 describe('authorization', () => {
   it('enforces every role capability and denial path', () => {
     const allowed = {
-      owner: ['members:read', 'members:write', 'api_keys:create', 'api_keys:manage_any', 'api_keys:manage_own', 'audit:read'],
-      admin: ['members:read', 'members:write', 'api_keys:create', 'api_keys:manage_any', 'api_keys:manage_own', 'audit:read'],
-      editor: ['api_keys:create', 'api_keys:manage_own'],
-      viewer: [],
+      owner: ['members:read', 'members:write', 'projects:read', 'projects:create', 'projects:update', 'projects:delete', 'api_keys:create', 'api_keys:manage_any', 'api_keys:manage_own', 'audit:read'],
+      admin: ['members:read', 'members:write', 'projects:read', 'projects:create', 'projects:update', 'projects:delete', 'api_keys:create', 'api_keys:manage_any', 'api_keys:manage_own', 'audit:read'],
+      editor: ['projects:read', 'projects:create', 'projects:update', 'api_keys:create', 'api_keys:manage_own'],
+      viewer: ['projects:read'],
     } as const;
-    const capabilities = ['members:read', 'members:write', 'api_keys:create', 'api_keys:manage_any', 'api_keys:manage_own', 'audit:read'] as const;
+    const capabilities = ['members:read', 'members:write', 'projects:read', 'projects:create', 'projects:update', 'projects:delete', 'api_keys:create', 'api_keys:manage_any', 'api_keys:manage_own', 'audit:read'] as const;
 
     for (const [role, permitted] of Object.entries(allowed) as [keyof typeof allowed, readonly (typeof capabilities)[number]][]) {
       for (const capability of capabilities) {

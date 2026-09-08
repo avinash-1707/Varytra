@@ -102,6 +102,10 @@ export function buildApp(options: BuildAppOptions = {}) {
       name: z.string().trim().min(1).max(100),
       scopes: z.array(z.enum(['ci:read', 'ci:write'])).min(1),
     });
+    const projectSchema = z.object({
+      name: z.string().trim().min(1).max(120),
+      description: z.string().trim().max(500).optional().transform((value) => value === '' ? undefined : value),
+    });
 
     function authorizationReply(error: AuthorizationError, reply: { status: (code: number) => { send: (body: unknown) => unknown } }): unknown {
       const status = error.code === 'invalid_credentials' ? 401 : error.code === 'invalid_request' ? 400 : error.code === 'active_organization_required' ? 409 : error.code === 'forbidden' ? 403 : 404;
@@ -241,6 +245,145 @@ export function buildApp(options: BuildAppOptions = {}) {
           return result.rows;
         });
         return { events };
+      } catch (error) {
+        if (error instanceof AuthorizationError) return authorizationReply(error, reply);
+        throw error;
+      }
+    });
+
+    app.get('/v1/projects', async (request, reply) => {
+      try {
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'projects:read');
+        const projects = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          const result = await client.query(
+            `SELECT id, name, description, data_classification AS "dataClassification", retention_days AS "retentionDays", updated_at AS "updatedAt", created_at AS "createdAt"
+             FROM projects WHERE organization_id = $1 ORDER BY updated_at DESC, id DESC`,
+            [membership.organizationId],
+          );
+          return result.rows;
+        });
+        return { projects };
+      } catch (error) {
+        if (error instanceof AuthorizationError) return authorizationReply(error, reply);
+        throw error;
+      }
+    });
+
+    app.post('/v1/projects', async (request, reply) => {
+      try {
+        const body = projectSchema.safeParse(request.body);
+        if (!body.success) return reply.status(400).send({ error: 'invalid_request' });
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'projects:create');
+        const project = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          const defaults = await client.query<Readonly<{ dataClassification: 'standard' | 'sensitive' | 'restricted'; retentionDays: number }>>(
+            'SELECT data_classification AS "dataClassification", retention_days AS "retentionDays" FROM organizations WHERE id = $1',
+            [membership.organizationId],
+          );
+          const organization = defaults.rows[0];
+          if (organization === undefined) throw new AuthorizationError('not_found');
+          const result = await client.query(
+            `INSERT INTO projects (organization_id, name, description, data_classification, retention_days)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING id, name, description, data_classification AS "dataClassification", retention_days AS "retentionDays", updated_at AS "updatedAt", created_at AS "createdAt"`,
+            [membership.organizationId, body.data.name, body.data.description ?? null, organization.dataClassification, organization.retentionDays],
+          );
+          const created = result.rows[0];
+          if (created === undefined) throw new Error('Project insert did not return a row');
+          await writeAuditEvent(client, { organizationId: membership.organizationId, actorType: 'user', actorId: membership.userId, action: 'project.created', targetType: 'project', targetId: created.id });
+          return created;
+        });
+        return reply.status(201).send({ project });
+      } catch (error) {
+        if (error instanceof AuthorizationError) return authorizationReply(error, reply);
+        throw error;
+      }
+    });
+
+    app.get('/v1/projects/:projectId', async (request, reply) => {
+      try {
+        const projectId = (request.params as { readonly projectId?: string }).projectId;
+        if (!isUuid(projectId)) return reply.status(400).send({ error: 'invalid_request' });
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'projects:read');
+        const project = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          const result = await client.query(
+            `SELECT id, name, description, data_classification AS "dataClassification", retention_days AS "retentionDays", updated_at AS "updatedAt", created_at AS "createdAt"
+             FROM projects WHERE id = $1`,
+            [projectId],
+          );
+          return result.rows[0];
+        });
+        if (project === undefined) throw new AuthorizationError('not_found');
+        return { project };
+      } catch (error) {
+        if (error instanceof AuthorizationError) return authorizationReply(error, reply);
+        throw error;
+      }
+    });
+
+    app.patch('/v1/projects/:projectId', async (request, reply) => {
+      try {
+        const projectId = (request.params as { readonly projectId?: string }).projectId;
+        const body = projectSchema.partial().safeParse(request.body);
+        if (!isUuid(projectId) || !body.success || Object.keys(body.data).length === 0) return reply.status(400).send({ error: 'invalid_request' });
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'projects:update');
+        const project = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          const result = await client.query(
+            `UPDATE projects SET name = COALESCE($2, name), description = COALESCE($3, description), updated_at = now()
+             WHERE id = $1
+             RETURNING id, name, description, data_classification AS "dataClassification", retention_days AS "retentionDays", updated_at AS "updatedAt", created_at AS "createdAt"`,
+            [projectId, body.data.name ?? null, body.data.description ?? null],
+          );
+          const updated = result.rows[0];
+          if (updated === undefined) throw new AuthorizationError('not_found');
+          await writeAuditEvent(client, { organizationId: membership.organizationId, actorType: 'user', actorId: membership.userId, action: 'project.updated', targetType: 'project', targetId: projectId });
+          return updated;
+        });
+        return { project };
+      } catch (error) {
+        if (error instanceof AuthorizationError) return authorizationReply(error, reply);
+        throw error;
+      }
+    });
+
+    app.get('/v1/projects/:projectId/audit-events', async (request, reply) => {
+      try {
+        const projectId = (request.params as { readonly projectId?: string }).projectId;
+        if (!isUuid(projectId)) return reply.status(400).send({ error: 'invalid_request' });
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'audit:read');
+        const events = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          const project = await client.query('SELECT 1 FROM projects WHERE id = $1', [projectId]);
+          if (project.rowCount !== 1) throw new AuthorizationError('not_found');
+          const result = await client.query(
+            `SELECT id, actor_type AS "actorType", actor_id AS "actorId", action, target_type AS "targetType", target_id AS "targetId", occurred_at AS "occurredAt"
+             FROM audit_events WHERE organization_id = $1 AND target_type = 'project' AND target_id = $2 ORDER BY occurred_at DESC, id DESC`,
+            [membership.organizationId, projectId],
+          );
+          return result.rows;
+        });
+        return { events };
+      } catch (error) {
+        if (error instanceof AuthorizationError) return authorizationReply(error, reply);
+        throw error;
+      }
+    });
+
+    app.delete('/v1/projects/:projectId', async (request, reply) => {
+      try {
+        const projectId = (request.params as { readonly projectId?: string }).projectId;
+        if (!isUuid(projectId)) return reply.status(400).send({ error: 'invalid_request' });
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'projects:delete');
+        await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          const deleted = await client.query('DELETE FROM projects WHERE id = $1', [projectId]);
+          if (deleted.rowCount !== 1) throw new AuthorizationError('not_found');
+          await writeAuditEvent(client, { organizationId: membership.organizationId, actorType: 'user', actorId: membership.userId, action: 'project.deleted', targetType: 'project', targetId: projectId });
+        });
+        return reply.status(204).send();
       } catch (error) {
         if (error instanceof AuthorizationError) return authorizationReply(error, reply);
         throw error;
