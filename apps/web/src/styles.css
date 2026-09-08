@@ -29,13 +29,15 @@ body {
 button,
 input,
 textarea,
+select,
 a {
   -webkit-tap-highlight-color: transparent;
 }
 
 button,
 input,
-textarea {
+textarea,
+select {
   font: inherit;
 }
 
@@ -380,7 +382,8 @@ h2 {
 }
 
 input,
-textarea {
+textarea,
+select {
   width: 100%;
   border: 1px solid #2a2926;
   border-radius: 2px;
@@ -396,6 +399,12 @@ input {
   padding: 10px 12px;
 }
 
+select {
+  min-height: 44px;
+  padding: 10px 36px 10px 12px;
+  appearance: auto;
+}
+
 textarea {
   min-height: 86px;
   padding: 10px 12px;
@@ -403,12 +412,14 @@ textarea {
 }
 
 input:hover,
-textarea:hover {
+textarea:hover,
+select:hover {
   border-color: #005b9a;
 }
 
 input:disabled,
-textarea:disabled {
+textarea:disabled,
+select:disabled {
   cursor: not-allowed;
   border-color: #c9c6be;
   background: #eceae4;
@@ -498,6 +509,288 @@ footer {
 
   .create-pane {
     grid-column: 5 / -1;
+  }
+}
+
+.version-pane {
+  grid-column: 2 / span 10;
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 24px 32px;
+  margin-top: 32px;
+  padding: 16px;
+  border-top: 2px solid #171716;
+  border-bottom: 1px solid #c9c6be;
+  background: #fffefa;
+}
+
+.version-pane-heading {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.version-pane-heading .eyebrow,
+.project-selector label,
+.resolved-preview .eyebrow,
+.configuration-record .eyebrow {
+  margin-bottom: 4px;
+}
+
+.version-pane-heading > p:last-child {
+  max-width: 340px;
+  margin-bottom: 0;
+  color: #5e5c56;
+  font-size: 14px;
+  line-height: 21px;
+}
+
+.project-selector {
+  align-self: start;
+}
+
+.field-help {
+  margin: 0;
+  color: #5e5c56;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.version-state,
+.version-loading,
+.version-controls,
+.resolved-preview {
+  grid-column: 1 / -1;
+}
+
+.version-state {
+  min-height: 160px;
+  padding: 24px 0 8px;
+  border-top: 1px solid #c9c6be;
+}
+
+.version-state .eyebrow {
+  margin-bottom: 8px;
+}
+
+.version-state h3,
+.resolved-preview h3 {
+  max-width: 540px;
+  margin-bottom: 8px;
+  font-size: 24px;
+  font-weight: 550;
+  letter-spacing: -0.03em;
+  line-height: 30px;
+}
+
+.version-state > p:last-child {
+  max-width: 600px;
+  margin-bottom: 0;
+  color: #5e5c56;
+  font-size: 14px;
+  line-height: 21px;
+}
+
+.version-state--error {
+  padding-inline: 16px;
+  border-left: 2px solid #a85d00;
+  background: #f7e7c8;
+}
+
+.version-state--permission {
+  padding-inline: 16px;
+  border-left: 2px solid #c83e2d;
+  background: #f7ddd8;
+}
+
+.version-loading {
+  display: grid;
+  gap: 12px;
+  min-height: 160px;
+  padding: 24px 0;
+  border-top: 1px solid #c9c6be;
+}
+
+.version-loading span {
+  display: block;
+  height: 12px;
+  background: #eceae4;
+}
+
+.version-loading span:nth-child(1) {
+  width: 40%;
+}
+
+.version-loading span:nth-child(2) {
+  width: 76%;
+}
+
+.version-loading span:nth-child(3) {
+  width: 58%;
+}
+
+.version-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 24px 32px;
+  padding-top: 24px;
+  border-top: 1px solid #c9c6be;
+}
+
+.agent-version-fields {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.agent-version-fields legend {
+  padding: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 21px;
+}
+
+.agent-version-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.selection-notice {
+  margin: 0;
+  padding: 8px 12px;
+  border-left: 2px solid #a85d00;
+  background: #f7e7c8;
+  color: #5e5c56;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.resolved-preview {
+  margin-top: 8px;
+  border-top: 2px solid #171716;
+  border-bottom: 1px solid #c9c6be;
+}
+
+.resolved-preview-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+  border-bottom: 1px solid #c9c6be;
+  background: #eceae4;
+}
+
+.resolved-preview h3 {
+  margin-bottom: 0;
+  font-size: 16px;
+  line-height: 22px;
+}
+
+.status-tag {
+  flex: none;
+  padding: 3px 6px;
+  border: 1px solid #005b9a;
+  color: #005b9a;
+  font-family: "Geist Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  line-height: 14px;
+  text-transform: uppercase;
+}
+
+.redaction-notice {
+  display: flex;
+  align-items: start;
+  gap: 8px;
+  margin: 0;
+  padding: 12px 16px;
+  border-bottom: 1px solid #c9c6be;
+  color: #5e5c56;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.redaction-swatch {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border: 1px solid #9a978e;
+  background: repeating-linear-gradient(135deg, transparent 0 3px, #9a978e 3px 4px);
+}
+
+.configuration-ledger {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.configuration-record {
+  min-width: 0;
+  padding: 16px;
+  border-right: 1px solid #c9c6be;
+}
+
+.configuration-record:last-child {
+  border-right: 0;
+}
+
+.configuration-record h4 {
+  min-width: 0;
+  margin: 0 0 16px;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 21px;
+}
+
+.configuration-record dl {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+}
+
+.configuration-record dl > div {
+  display: grid;
+  gap: 2px;
+}
+
+.configuration-record dt {
+  color: #5e5c56;
+  font-family: "Geist Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  line-height: 14px;
+  text-transform: uppercase;
+}
+
+.metadata-value {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family: "Geist Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.metadata-value--unavailable {
+  color: #5e5c56;
+  font-family: Geist, Inter, Arial, sans-serif;
+  font-style: italic;
+}
+
+@media (max-width: 900px) {
+  .version-pane {
+    grid-column: 1 / -1;
+    grid-template-columns: 1fr;
+  }
+
+  .version-controls {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -605,6 +898,44 @@ footer {
     grid-template-columns: 1fr;
     gap: 24px;
     margin-top: 24px;
+  }
+
+  .version-pane {
+    gap: 24px;
+    margin-top: 24px;
+    padding: 16px 0;
+    background: transparent;
+  }
+
+  .version-pane-heading,
+  .project-selector,
+  .version-controls,
+  .version-state,
+  .version-loading {
+    margin-inline: 0;
+  }
+
+  .version-controls {
+    gap: 24px;
+  }
+
+  .agent-version-grid,
+  .configuration-ledger {
+    grid-template-columns: 1fr;
+  }
+
+  .configuration-record {
+    border-right: 0;
+    border-bottom: 1px solid #c9c6be;
+  }
+
+  .configuration-record:last-child {
+    border-bottom: 0;
+  }
+
+  .resolved-preview-heading {
+    align-items: start;
+    flex-direction: column;
   }
 
   .create-pane-heading > p:last-child {
