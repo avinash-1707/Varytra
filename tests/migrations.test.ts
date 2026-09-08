@@ -25,6 +25,7 @@ describeDatabase('migrations', () => {
       '009_create_organization_authorization.sql',
       '010_add_organization_lifecycle_functions.sql',
       '011_expand_projects_for_workspace.sql',
+      '012_create_versioned_project_resources.sql',
     ]);
     expect(migrations.every((migration) => migration.checksum.length === 64)).toBe(true);
   });
@@ -54,6 +55,7 @@ describeDatabase('migrations', () => {
       '009_create_organization_authorization.sql',
       '010_add_organization_lifecycle_functions.sql',
       '011_expand_projects_for_workspace.sql',
+      '012_create_versioned_project_resources.sql',
     ]);
     expect(roles.rows).toEqual([
       { rolname: 'varytra_app', rolbypassrls: false },

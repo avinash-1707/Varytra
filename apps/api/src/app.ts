@@ -1,4 +1,5 @@
 import Fastify from 'fastify';
+import { createHash } from 'node:crypto';
 import { fromNodeHeaders } from 'better-auth/node';
 import { createLogger, runWithLogContext, serializeError, type Logger } from '@varytra/runtime';
 import type { Pool } from 'pg';
@@ -106,6 +107,13 @@ export function buildApp(options: BuildAppOptions = {}) {
       name: z.string().trim().min(1).max(120),
       description: z.string().trim().max(500).optional().transform((value) => value === '' ? undefined : value),
     });
+    const policySchema = z.object({ stable_key: z.string().regex(/^[a-z][a-z0-9_-]{0,99}$/), rules: z.object({ prohibited_actions: z.array(z.string().min(1)).max(100), required_approvals: z.array(z.string().min(1)).max(100), severity: z.enum(['low', 'medium', 'high', 'critical']) }) });
+    const scenarioSchema = z.object({ stable_key: z.string().regex(/^[a-z][a-z0-9_-]{0,99}$/), task_spec: z.object({ input: z.string().min(1).max(20_000), success_definition: z.string().min(1).max(10_000) }), fixture_ref: z.string().min(1).max(500), assertion_spec: z.object({ expected_state: z.record(z.string(), z.unknown()), assertions: z.array(z.string().min(1)).min(1).max(100) }), efficiency_budget: z.object({ max_tool_calls: z.number().int().positive().max(10_000), max_cost_usd: z.number().positive().max(100_000) }), policy_version_id: z.uuid().optional() });
+    const agentVersionSchema = z.object({ stable_key: z.string().regex(/^[a-z][a-z0-9_-]{0,99}$/), adapter_type: z.enum(['reference', 'registered-http']), config_ref: z.string().regex(/^(secret|vault):\/\/[A-Za-z0-9._/-]+$/), model_metadata: z.object({ model: z.string().min(1).max(200) }).catchall(z.string().max(500)) });
+
+    function contentHash(value: unknown): string {
+      return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    }
 
     function authorizationReply(error: AuthorizationError, reply: { status: (code: number) => { send: (body: unknown) => unknown } }): unknown {
       const status = error.code === 'invalid_credentials' ? 401 : error.code === 'invalid_request' ? 400 : error.code === 'active_organization_required' ? 409 : error.code === 'forbidden' ? 403 : 404;
@@ -388,6 +396,74 @@ export function buildApp(options: BuildAppOptions = {}) {
         if (error instanceof AuthorizationError) return authorizationReply(error, reply);
         throw error;
       }
+    });
+
+    async function projectMembership(request: { readonly headers: Record<string, string | string[] | undefined>; readonly params: unknown }, capability: Capability): Promise<{ readonly membership: Membership; readonly projectId: string }> {
+      const projectId = (request.params as { readonly projectId?: string }).projectId;
+      if (!isUuid(projectId)) throw new AuthorizationError('invalid_request');
+      const membership = await authenticatedMembership(request);
+      authorize(membership, capability);
+      return { membership, projectId };
+    }
+
+    app.get('/v1/projects/:projectId/scenario-versions', async (request, reply) => {
+      try {
+        const { membership, projectId } = await projectMembership(request, 'versions:read');
+        const scenarioVersions = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => (await client.query(`SELECT id, scenario_id AS "scenarioId", version, fixture_ref AS "fixtureRef", policy_version_id AS "policyVersion", content_hash AS "contentHash", created_at AS "createdAt" FROM scenario_versions WHERE project_id = $1 ORDER BY created_at DESC`, [projectId])).rows);
+        return { scenario_versions: scenarioVersions };
+      } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
+    });
+
+    app.get('/v1/projects/:projectId/agent-versions', async (request, reply) => {
+      try {
+        const { membership, projectId } = await projectMembership(request, 'versions:read');
+        const agentVersions = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => (await client.query(`SELECT id, stable_key AS "stableKey", version, adapter_type AS "adapterType", model_metadata AS "modelMetadata", content_hash AS "contentHash", created_at AS "createdAt" FROM agent_versions WHERE project_id = $1 ORDER BY created_at DESC`, [projectId])).rows);
+        return { agent_versions: agentVersions };
+      } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
+    });
+
+    app.post('/v1/projects/:projectId/policies', async (request, reply) => {
+      try {
+        const body = policySchema.safeParse(request.body); if (!body.success) return reply.status(400).send({ error: 'invalid_request' });
+        const { membership, projectId } = await projectMembership(request, 'versions:create');
+        const policyVersion = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          const policy = await client.query<{ readonly id: string }>('INSERT INTO policies (organization_id, project_id, stable_key) VALUES ($1, $2, $3) RETURNING id', [membership.organizationId, projectId, body.data.stable_key]);
+          const policyId = policy.rows[0]?.id; if (policyId === undefined) throw new Error('Policy insert did not return a row');
+          const hash = contentHash(body.data.rules);
+          const version = await client.query('INSERT INTO policy_versions (organization_id, project_id, policy_id, version, rules, content_hash, created_by_user_id) VALUES ($1, $2, $3, 1, $4, $5, $6) RETURNING id, version, content_hash AS "contentHash"', [membership.organizationId, projectId, policyId, body.data.rules, hash, membership.userId]);
+          return version.rows[0];
+        });
+        return reply.status(201).send({ policy_version: policyVersion });
+      } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
+    });
+
+    app.post('/v1/projects/:projectId/scenarios', async (request, reply) => {
+      try {
+        const body = scenarioSchema.safeParse(request.body); if (!body.success) return reply.status(400).send({ error: 'invalid_request' });
+        const { membership, projectId } = await projectMembership(request, 'versions:create');
+        const scenarioVersion = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          if (body.data.policy_version_id !== undefined && (await client.query('SELECT 1 FROM policy_versions WHERE id = $1 AND project_id = $2', [body.data.policy_version_id, projectId])).rowCount !== 1) throw new AuthorizationError('not_found');
+          const scenario = await client.query<{ readonly id: string }>('INSERT INTO scenarios (organization_id, project_id, stable_key) VALUES ($1, $2, $3) RETURNING id', [membership.organizationId, projectId, body.data.stable_key]);
+          const scenarioId = scenario.rows[0]?.id; if (scenarioId === undefined) throw new Error('Scenario insert did not return a row');
+          const hash = contentHash(body.data);
+          const version = await client.query(`INSERT INTO scenario_versions (organization_id, project_id, scenario_id, version, task_spec, fixture_ref, assertion_spec, efficiency_budget, policy_version_id, content_hash, created_by_user_id) VALUES ($1, $2, $3, 1, $4, $5, $6, $7, $8, $9, $10) RETURNING id, scenario_id AS "scenarioId", version, fixture_ref AS "fixtureRef", policy_version_id AS "policyVersion", content_hash AS "contentHash"`, [membership.organizationId, projectId, scenarioId, body.data.task_spec, body.data.fixture_ref, body.data.assertion_spec, body.data.efficiency_budget, body.data.policy_version_id ?? null, hash, membership.userId]);
+          return version.rows[0];
+        });
+        return reply.status(201).send({ scenario_version: scenarioVersion });
+      } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
+    });
+
+    app.post('/v1/projects/:projectId/agent-versions', async (request, reply) => {
+      try {
+        const body = agentVersionSchema.safeParse(request.body); if (!body.success) return reply.status(400).send({ error: 'invalid_request' });
+        const { membership, projectId } = await projectMembership(request, 'versions:create');
+        const agentVersion = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          const hash = contentHash(body.data);
+          const result = await client.query(`INSERT INTO agent_versions (organization_id, project_id, stable_key, version, adapter_type, config_ref, model_metadata, content_hash, created_by_user_id) VALUES ($1, $2, $3, 1, $4, $5, $6, $7, $8) RETURNING id, stable_key AS "stableKey", version, adapter_type AS "adapterType", model_metadata AS "modelMetadata", content_hash AS "contentHash"`, [membership.organizationId, projectId, body.data.stable_key, body.data.adapter_type, body.data.config_ref, body.data.model_metadata, hash, membership.userId]);
+          return result.rows[0];
+        });
+        return reply.status(201).send({ agent_version: agentVersion });
+      } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
     });
 
     app.post('/v1/projects/:projectId/api-keys', async (request, reply) => {
