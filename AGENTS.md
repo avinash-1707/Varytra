@@ -68,3 +68,7 @@
 <!-- Added: 2026-09-07 -->
 ## Commit Granularity
 Split implementation milestones into independently coherent, buildable commits (for example, reusable foundation plus consuming integration), rather than one commit per milestone. Do not combine an entire build-plan unit into a single commit when it contains separable concerns.
+
+<!-- Added: 2026-09-07 -->
+## Artifact Storage
+Use Cloudinary rather than S3-compatible object storage for Varytra artifacts. Update the architecture and security contract before replacing the existing S3 implementation.
