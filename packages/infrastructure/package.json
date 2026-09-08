@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./migrate": "./src/migrate.ts"
+    "./migrate": "./src/migrate.ts",
+    "./scheduling": "./src/scheduling.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

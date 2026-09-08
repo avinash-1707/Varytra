@@ -26,6 +26,8 @@ describeDatabase('migrations', () => {
       '010_add_organization_lifecycle_functions.sql',
       '011_expand_projects_for_workspace.sql',
       '012_create_versioned_project_resources.sql',
+      '013_create_comparison_batch_scheduler.sql',
+      '014_enforce_agent_run_lease_invariants.sql',
     ]);
     expect(migrations.every((migration) => migration.checksum.length === 64)).toBe(true);
   });
@@ -56,6 +58,8 @@ describeDatabase('migrations', () => {
       '010_add_organization_lifecycle_functions.sql',
       '011_expand_projects_for_workspace.sql',
       '012_create_versioned_project_resources.sql',
+      '013_create_comparison_batch_scheduler.sql',
+      '014_enforce_agent_run_lease_invariants.sql',
     ]);
     expect(roles.rows).toEqual([
       { rolname: 'varytra_app', rolbypassrls: false },
