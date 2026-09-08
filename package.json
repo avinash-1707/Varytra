@@ -17,6 +17,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "@varytra/infrastructure": "workspace:*",
+    "@varytra/reference-environment": "workspace:*",
     "@varytra/runtime": "workspace:*",
     "@varytra/schemas": "workspace:*",
     "eslint": "^10.10.0",

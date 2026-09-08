@@ -23,6 +23,9 @@ importers:
       '@varytra/infrastructure':
         specifier: workspace:*
         version: link:packages/infrastructure
+      '@varytra/reference-environment':
+        specifier: workspace:*
+        version: link:packages/reference-environment
       '@varytra/runtime':
         specifier: workspace:*
         version: link:packages/runtime
@@ -122,6 +125,8 @@ importers:
       '@types/pg':
         specifier: ^8.23.1
         version: 8.23.1
+
+  packages/reference-environment: {}
 
   packages/runtime:
     dependencies:
