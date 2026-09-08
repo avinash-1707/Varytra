@@ -8,6 +8,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@varytra/runtime": "workspace:*"
+    "@varytra/infrastructure": "workspace:*",
+    "@varytra/runtime": "workspace:*",
+    "@varytra/schemas": "workspace:*",
+    "bullmq": "^6.3.4"
   }
 }

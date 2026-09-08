@@ -5,7 +5,7 @@ import { withOrganizationTransaction } from '@varytra/infrastructure';
 
 const scrypt = promisify(scryptCallback) as (password: string, salt: Buffer, keylen: number) => Promise<Buffer>;
 const roles = ['owner', 'admin', 'editor', 'viewer'] as const;
-const capabilities = ['members:read', 'members:write', 'projects:read', 'projects:create', 'projects:update', 'projects:delete', 'versions:read', 'versions:create', 'api_keys:create', 'api_keys:manage_any', 'api_keys:manage_own', 'audit:read'] as const;
+const capabilities = ['members:read', 'members:write', 'projects:read', 'projects:create', 'projects:update', 'projects:delete', 'versions:read', 'versions:create', 'batches:create', 'batches:read', 'api_keys:create', 'api_keys:manage_any', 'api_keys:manage_own', 'audit:read'] as const;
 const apiKeyScopes = ['ci:read', 'ci:write'] as const;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -16,8 +16,8 @@ export type ApiKeyScope = (typeof apiKeyScopes)[number];
 const roleCapabilities: Readonly<Record<OrganizationRole, readonly Capability[]>> = {
   owner: capabilities,
   admin: capabilities,
-  editor: ['projects:read', 'projects:create', 'projects:update', 'versions:read', 'versions:create', 'api_keys:create', 'api_keys:manage_own'],
-  viewer: ['projects:read', 'versions:read'],
+  editor: ['projects:read', 'projects:create', 'projects:update', 'versions:read', 'versions:create', 'batches:create', 'batches:read', 'api_keys:create', 'api_keys:manage_own'],
+  viewer: ['projects:read', 'versions:read', 'batches:read'],
 };
 
 export class AuthorizationError extends Error {

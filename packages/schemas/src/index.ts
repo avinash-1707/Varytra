@@ -6,6 +6,14 @@ export const healthResponseSchema = z.object({
 
 export type HealthResponse = z.infer<typeof healthResponseSchema>;
 
+export const runDispatchSchema = z.object({
+  organizationId: z.uuid(),
+  runId: z.uuid(),
+  dispatchId: z.uuid(),
+});
+
+export type RunDispatch = z.infer<typeof runDispatchSchema>;
+
 export const traceSchemaVersion = '1.0' as const;
 
 const traceIdSchema = z.string().min(1).max(128);

@@ -11,6 +11,7 @@
     "@varytra/infrastructure": "workspace:*",
     "@varytra/runtime": "workspace:*",
     "better-auth": "^1.7.3",
+    "bullmq": "^6.3.4",
     "fastify": "^5.12.3",
     "nodemailer": "^10.0.0",
     "pg": "^8.23.0",

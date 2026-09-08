@@ -4,6 +4,7 @@ import { fromNodeHeaders } from 'better-auth/node';
 import { createLogger, runWithLogContext, serializeError, type Logger } from '@varytra/runtime';
 import type { Pool } from 'pg';
 import { withOrganizationTransaction } from '@varytra/infrastructure';
+import { createComparisonBatch, markDispatchPublished, readyDispatches, SchedulingError } from '@varytra/infrastructure/scheduling';
 import { z } from 'zod';
 import {
   authenticateCiPrincipal,
@@ -31,6 +32,7 @@ export interface BuildAppOptions {
   readonly auth?: AuthHandler;
   readonly logger?: Logger;
   readonly database?: Pool;
+  readonly dispatchPublisher?: Readonly<{ publish: (dispatch: { readonly dispatchId: string; readonly organizationId: string; readonly runId: string }) => Promise<void> }>;
 }
 
 export function buildApp(options: BuildAppOptions = {}) {
@@ -110,6 +112,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     const policySchema = z.object({ stable_key: z.string().regex(/^[a-z][a-z0-9_-]{0,99}$/), rules: z.object({ prohibited_actions: z.array(z.string().min(1)).max(100), required_approvals: z.array(z.string().min(1)).max(100), severity: z.enum(['low', 'medium', 'high', 'critical']) }) });
     const scenarioSchema = z.object({ stable_key: z.string().regex(/^[a-z][a-z0-9_-]{0,99}$/), task_spec: z.object({ input: z.string().min(1).max(20_000), success_definition: z.string().min(1).max(10_000) }), fixture_ref: z.string().min(1).max(500), assertion_spec: z.object({ expected_state: z.record(z.string(), z.unknown()), assertions: z.array(z.string().min(1)).min(1).max(100) }), efficiency_budget: z.object({ max_tool_calls: z.number().int().positive().max(10_000), max_cost_usd: z.number().positive().max(100_000) }), policy_version_id: z.uuid().optional() });
     const agentVersionSchema = z.object({ stable_key: z.string().regex(/^[a-z][a-z0-9_-]{0,99}$/), adapter_type: z.enum(['reference', 'registered-http']), config_ref: z.string().regex(/^(secret|vault):\/\/[A-Za-z0-9._/-]+$/), model_metadata: z.object({ model: z.string().min(1).max(200) }).catchall(z.string().max(500)) });
+    const batchSchema = z.object({ baseline_agent_version_id: z.uuid(), candidate_agent_version_id: z.uuid(), scenario_version_ids: z.array(z.uuid()).min(1).max(100), repetition_count: z.number().int().min(1).max(20), idempotency_key: z.string().trim().min(1).max(128) });
 
     function contentHash(value: unknown): string {
       return createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -463,6 +466,53 @@ export function buildApp(options: BuildAppOptions = {}) {
           return result.rows[0];
         });
         return reply.status(201).send({ agent_version: agentVersion });
+      } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
+    });
+
+    app.post('/v1/comparison-batches', async (request, reply) => {
+      try {
+        const body = batchSchema.safeParse(request.body);
+        const projectId = typeof (request.body as { readonly project_id?: unknown } | undefined)?.project_id === 'string' ? (request.body as { readonly project_id: string }).project_id : undefined;
+        if (!body.success || !isUuid(projectId)) return reply.status(400).send({ error: 'invalid_request' });
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'batches:create');
+        const batch = await createComparisonBatch(options.database!, {
+          organizationId: membership.organizationId,
+          projectId,
+          userId: membership.userId,
+          baselineAgentVersionId: body.data.baseline_agent_version_id,
+          candidateAgentVersionId: body.data.candidate_agent_version_id,
+          scenarioVersionIds: body.data.scenario_version_ids,
+          repetitionCount: body.data.repetition_count,
+          idempotencyKey: body.data.idempotency_key,
+        });
+        if (options.dispatchPublisher !== undefined) {
+          const dispatches = await readyDispatches(options.database!, membership.organizationId, batch.id);
+          for (const dispatch of dispatches) {
+            await options.dispatchPublisher.publish(dispatch);
+            await markDispatchPublished(options.database!, membership.organizationId, dispatch.dispatchId);
+          }
+        }
+        return reply.status(201).send({ batch: { id: batch.id, status: batch.status, run_count: batch.runCount } });
+      } catch (error) {
+        if (error instanceof AuthorizationError) return authorizationReply(error, reply);
+        if (error instanceof SchedulingError) return reply.status(error.code === 'idempotency_key_reused' ? 409 : error.code === 'not_found' ? 404 : 400).send({ error: error.code });
+        throw error;
+      }
+    });
+
+    app.get('/v1/comparison-batches/:batchId', async (request, reply) => {
+      try {
+        const batchId = (request.params as { readonly batchId?: string }).batchId;
+        if (!isUuid(batchId)) return reply.status(400).send({ error: 'invalid_request' });
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'batches:read');
+        const batch = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => (await client.query<Readonly<{ id: string; status: 'queued' | 'running' | 'completed'; runCount: number }>>(
+          `SELECT id, status, (SELECT count(*)::integer FROM agent_runs WHERE batch_id = comparison_batches.id) AS "runCount"
+           FROM comparison_batches WHERE id = $1`, [batchId],
+        )).rows[0]);
+        if (batch === undefined) throw new AuthorizationError('not_found');
+        return { batch: { id: batch.id, status: batch.status, run_count: batch.runCount } };
       } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
     });
 
