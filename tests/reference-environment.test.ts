@@ -11,5 +11,7 @@ describe('reference-environment', () => {
 
     expect(candidateStart).toEqual(baselineStart);
     expect(baseline.finalState).toEqual(candidate.finalState);
+    expect(baseline.trace[0]).not.toHaveProperty('arguments');
+    expect(baseline.trace[0]?.argumentsRedacted).toBe('[REDACTED]');
   });
 });
