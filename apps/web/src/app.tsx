@@ -1,4 +1,5 @@
 import { type FormEvent, useEffect, useMemo, useState } from 'react';
+import { readComparisonIdFromSearch, ReportScreen } from './report';
 
 const ORGANIZATION_STORAGE_KEY = 'x-varytra-organization';
 
@@ -826,7 +827,7 @@ export function BatchProgressStateView({ state, onRetry }: Readonly<{
   );
 }
 
-export function App() {
+function Workspace() {
   const [organizationName] = useState(readOrganizationName);
   const [projectState, setProjectState] = useState<ProjectListState>({ status: 'loading' });
   const [selectedProjectId, setSelectedProjectId] = useState('');
@@ -1157,4 +1158,9 @@ export function App() {
       </footer>
     </main>
   );
+}
+
+export function App() {
+  const comparisonId = typeof window === 'undefined' ? null : readComparisonIdFromSearch(window.location.search);
+  return comparisonId === null ? <Workspace /> : <ReportScreen comparisonId={comparisonId} />;
 }
