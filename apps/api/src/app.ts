@@ -113,6 +113,11 @@ export function buildApp(options: BuildAppOptions = {}) {
     const scenarioSchema = z.object({ stable_key: z.string().regex(/^[a-z][a-z0-9_-]{0,99}$/), task_spec: z.object({ input: z.string().min(1).max(20_000), success_definition: z.string().min(1).max(10_000) }), fixture_ref: z.string().min(1).max(500), assertion_spec: z.object({ expected_state: z.record(z.string(), z.unknown()), assertions: z.array(z.string().min(1)).min(1).max(100) }), efficiency_budget: z.object({ max_tool_calls: z.number().int().positive().max(10_000), max_cost_usd: z.number().positive().max(100_000) }), policy_version_id: z.uuid().optional() });
     const agentVersionSchema = z.object({ stable_key: z.string().regex(/^[a-z][a-z0-9_-]{0,99}$/), adapter_type: z.enum(['reference', 'registered-http']), config_ref: z.string().regex(/^(secret|vault):\/\/[A-Za-z0-9._/-]+$/), model_metadata: z.object({ model: z.string().min(1).max(200) }).catchall(z.string().max(500)) });
     const batchSchema = z.object({ baseline_agent_version_id: z.uuid(), candidate_agent_version_id: z.uuid(), scenario_version_ids: z.array(z.uuid()).min(1).max(100), repetition_count: z.number().int().min(1).max(20), idempotency_key: z.string().trim().min(1).max(128) });
+    const comparisonClassificationSchema = z.enum(['improvement', 'no-material-change', 'suspected-regression', 'inconclusive']);
+    const reviewSchema = z.object({ action: z.enum(['approve', 'reject', 'mark_inconclusive', 'override_classification']), rationale: z.string().trim().min(1).max(2000), override_classification: comparisonClassificationSchema.optional() }).superRefine((value, context) => {
+      if (value.action === 'override_classification' && value.override_classification === undefined) context.addIssue({ code: 'custom', message: 'override classification is required', path: ['override_classification'] });
+      if (value.action !== 'override_classification' && value.override_classification !== undefined) context.addIssue({ code: 'custom', message: 'override classification is only allowed for override decisions', path: ['override_classification'] });
+    });
 
     function contentHash(value: unknown): string {
       return createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -125,6 +130,38 @@ export function buildApp(options: BuildAppOptions = {}) {
 
     function isUuid(value: string | undefined): value is string {
       return value !== undefined && z.uuid().safeParse(value).success;
+    }
+
+    function reportGateStatus(action: z.infer<typeof reviewSchema>['action']): 'pass' | 'warn' | 'block' | 'review' {
+      return ({ approve: 'pass', reject: 'block', mark_inconclusive: 'warn', override_classification: 'review' } as const)[action];
+    }
+
+    function reportJsonObject(value: unknown): Record<string, unknown> {
+      return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    }
+
+    function redactReviewRationale(value: string): string {
+      // Reviewer input is a report trust boundary, so never render credential-like values or pasted structured payloads by default.
+      return /(?:api[-_]?key|authorization|bearer|cookie|password|secret|token)\s*[=:]|(?:sk-[a-z0-9_-]{8,}|gh[pousr]_|github_pat_|akia[0-9a-z]{16}|eyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+)|(?:^|\n)\s*[[{]/i.test(value) ? '[REDACTED_RESTRICTED_CONTENT]' : value;
+    }
+
+    function safeReportProjection(value: Readonly<{ coverage: unknown; firstMaterialDivergence: unknown; stateComparison: unknown }>) {
+      const coverage = reportJsonObject(value.coverage);
+      const divergence = reportJsonObject(value.firstMaterialDivergence);
+      const stateComparison = reportJsonObject(value.stateComparison);
+      const number = (candidate: unknown): number => typeof candidate === 'number' && Number.isSafeInteger(candidate) && candidate >= 0 ? candidate : 0;
+      const text = (candidate: unknown): string | null => typeof candidate === 'string' && candidate.length > 0 ? candidate : null;
+      const range = (candidate: unknown): readonly [number, number] | null => Array.isArray(candidate) && candidate.length === 2 && candidate.every((item) => typeof item === 'number' && Number.isSafeInteger(item) && item >= 0) ? [candidate[0] as number, candidate[1] as number] : null;
+      const changes = Array.isArray(stateComparison.changes) ? stateComparison.changes.flatMap((change) => {
+        const record = reportJsonObject(change);
+        const field = text(record.field);
+        return field === null ? [] : [{ field, baseline_value: text(record.baseline_value), candidate_value: text(record.candidate_value), relevance: text(record.relevance) }];
+      }) : [];
+      return {
+        coverage: { expected_pairs: number(coverage.expected_pairs), complete_pairs: number(coverage.complete_pairs), analyzable_pairs: number(coverage.analyzable_pairs) },
+        first_material_divergence: Object.keys(divergence).length === 0 ? null : { baseline_sequence_range: range(divergence.baseline_sequence_range), candidate_sequence_range: range(divergence.candidate_sequence_range), score: typeof divergence.score === 'number' && Number.isFinite(divergence.score) ? divergence.score : null },
+        state_comparison: { status: text(stateComparison.status) ?? 'unavailable', expected_summary: text(stateComparison.expected_summary), baseline_summary: text(stateComparison.baseline_summary), candidate_summary: text(stateComparison.candidate_summary), changes, redaction_reason: text(stateComparison.redaction_reason) },
+      };
     }
 
     async function authenticatedUser(request: { readonly headers: Record<string, string | string[] | undefined> }): Promise<string> {
@@ -542,6 +579,65 @@ export function buildApp(options: BuildAppOptions = {}) {
         )).rows[0]);
         if (progress === undefined) throw new AuthorizationError('not_found');
         return { progress: { batch_id: progress.batchId, status: progress.status, stage: progress.stage, runs: { total: progress.total, queued: progress.queued, running: progress.running, succeeded: progress.succeeded, failed: progress.failed } } };
+      } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
+    });
+
+    app.get('/v1/comparisons/:comparisonId/report', async (request, reply) => {
+      try {
+        const comparisonId = (request.params as { readonly comparisonId?: string }).comparisonId;
+        if (!isUuid(comparisonId)) return reply.status(400).send({ error: 'invalid_request' });
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'reports:read');
+        const report = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          const comparison = (await client.query<Readonly<{ classification: string; severity: string; confidence: string; gateStatus: 'pass' | 'warn' | 'block' | 'review'; summary: string; coverage: unknown; firstMaterialDivergence: unknown; stateComparison: unknown }>>(
+            `SELECT classification, severity, confidence, gate_status AS "gateStatus", summary_redacted AS summary, coverage,
+                    first_material_divergence AS "firstMaterialDivergence", state_comparison AS "stateComparison"
+             FROM comparisons WHERE id = $1`, [comparisonId],
+          )).rows[0];
+          if (comparison === undefined) throw new AuthorizationError('not_found');
+          const [findings, decisions] = await Promise.all([
+            client.query<Readonly<{ id: string; category: string; severity: string; repetition: number | null; summary: string }>>('SELECT id, category, severity, repetition, summary_redacted AS summary FROM comparison_findings WHERE comparison_id = $1 ORDER BY created_at, id', [comparisonId]),
+            client.query<Readonly<{ id: string; action: string; rationale: string; actor: string; createdAt: string; gateStatus: 'pass' | 'warn' | 'block' | 'review'; overrideClassification: z.infer<typeof comparisonClassificationSchema> | null }>>('SELECT id, action, rationale, actor_id AS actor, created_at AS "createdAt", resulting_gate_status AS "gateStatus", override_classification AS "overrideClassification" FROM review_decisions WHERE comparison_id = $1 ORDER BY created_at DESC, id DESC', [comparisonId]),
+          ]);
+          const projection = safeReportProjection(comparison);
+          const latestDecision = decisions.rows[0];
+          return {
+            classification: latestDecision?.overrideClassification ?? comparison.classification,
+            severity: comparison.severity,
+            confidence: comparison.confidence,
+            gate_status: latestDecision?.gateStatus ?? comparison.gateStatus,
+            summary: comparison.summary,
+            ...projection,
+            findings: findings.rows,
+            review_decisions: decisions.rows,
+          };
+        });
+        return { report };
+      } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
+    });
+
+    app.post('/v1/comparisons/:comparisonId/review', async (request, reply) => {
+      try {
+        const comparisonId = (request.params as { readonly comparisonId?: string }).comparisonId;
+        const body = reviewSchema.safeParse(request.body);
+        if (!isUuid(comparisonId) || !body.success) return reply.status(400).send({ error: 'invalid_request' });
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'reports:review');
+        const resultingGateStatus = reportGateStatus(body.data.action);
+        const decision = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          const comparison = await client.query('SELECT project_id FROM comparisons WHERE id = $1', [comparisonId]);
+          const projectId = comparison.rows[0]?.project_id as string | undefined;
+          if (projectId === undefined) throw new AuthorizationError('not_found');
+          const result = await client.query<Readonly<{ id: string; createdAt: string }>>(
+            'INSERT INTO review_decisions (organization_id, project_id, comparison_id, actor_id, action, rationale, override_classification, resulting_gate_status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, created_at AS "createdAt"',
+            [membership.organizationId, projectId, comparisonId, membership.userId, body.data.action, redactReviewRationale(body.data.rationale), body.data.override_classification ?? null, resultingGateStatus],
+          );
+          const created = result.rows[0];
+          if (created === undefined) throw new Error('Review decision insert did not return a row');
+          await writeAuditEvent(client, { organizationId: membership.organizationId, actorType: 'user', actorId: membership.userId, action: 'comparison.review_recorded', targetType: 'comparison', targetId: comparisonId, metadata: { action: body.data.action, gate_status: resultingGateStatus, review_decision_id: created.id } });
+          return created;
+        });
+        return reply.status(201).send({ review_decision: { id: decision.id, action: body.data.action, override_classification: body.data.override_classification ?? null, gate_status: resultingGateStatus, created_at: decision.createdAt } });
       } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
     });
 
