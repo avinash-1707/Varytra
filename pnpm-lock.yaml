@@ -148,6 +148,9 @@ importers:
 
   packages/evaluation:
     dependencies:
+      '@varytra/alignment':
+        specifier: workspace:*
+        version: link:../alignment
       '@varytra/schemas':
         specifier: workspace:*
         version: link:../schemas
