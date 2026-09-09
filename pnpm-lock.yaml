@@ -20,9 +20,15 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.7
         version: 19.2.7(@types/react@19.2.18)
+      '@varytra/evaluation':
+        specifier: workspace:*
+        version: link:packages/evaluation
       '@varytra/infrastructure':
         specifier: workspace:*
         version: link:packages/infrastructure
+      '@varytra/normalization':
+        specifier: workspace:*
+        version: link:packages/normalization
       '@varytra/reference-environment':
         specifier: workspace:*
         version: link:packages/reference-environment
@@ -128,6 +134,12 @@ importers:
         specifier: ^6.3.4
         version: 6.3.4(pg@8.23.0)
 
+  packages/evaluation:
+    dependencies:
+      '@varytra/schemas':
+        specifier: workspace:*
+        version: link:../schemas
+
   packages/infrastructure:
     dependencies:
       cloudinary:
@@ -140,6 +152,12 @@ importers:
       '@types/pg':
         specifier: ^8.23.1
         version: 8.23.1
+
+  packages/normalization:
+    dependencies:
+      '@varytra/schemas':
+        specifier: workspace:*
+        version: link:../schemas
 
   packages/reference-environment:
     dependencies:
