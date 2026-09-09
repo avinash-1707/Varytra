@@ -42,7 +42,7 @@ export async function withOrganizationTransaction<T>(
   }
 }
 
-const artifactKinds = ['raw-trace', 'redacted-trace', 'report'] as const;
+const artifactKinds = ['raw-trace', 'redacted-trace', 'normalized-trace', 'report'] as const;
 const artifactClassifications = ['restricted', 'sensitive', 'internal'] as const;
 const maximumSignedUrlLifetimeSeconds = 60;
 
@@ -153,7 +153,8 @@ function artifactKey(owner: ArtifactOwner, kind: ArtifactKind): string {
     throw new ArtifactAccessError('Run artifacts require a run ID');
   }
 
-  return `${prefix}/run/${owner.runId}/${kind === 'raw-trace' ? 'raw.jsonl' : 'redacted.jsonl'}`;
+  const filename = kind === 'raw-trace' ? 'raw.jsonl' : kind === 'redacted-trace' ? 'redacted.jsonl' : 'normalized.jsonl';
+  return `${prefix}/run/${owner.runId}/${filename}`;
 }
 
 function assertArtifactOwner(owner: ArtifactOwner): void {

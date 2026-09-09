@@ -516,6 +516,35 @@ export function buildApp(options: BuildAppOptions = {}) {
       } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
     });
 
+    app.get('/v1/comparison-batches/:batchId/progress', async (request, reply) => {
+      try {
+        const batchId = (request.params as { readonly batchId?: string }).batchId;
+        if (!isUuid(batchId)) return reply.status(400).send({ error: 'invalid_request' });
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'batches:read');
+        const progress = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => (await client.query<Readonly<{
+          batchId: string;
+          stage: 'queued' | 'preparing_fixture' | 'running_baseline' | 'running_candidate' | 'complete' | 'failed';
+          status: 'queued' | 'running' | 'completed';
+          total: number;
+          queued: number;
+          running: number;
+          succeeded: number;
+          failed: number;
+        }>>(
+          `SELECT id AS "batchId", status, progress_stage AS stage,
+             (SELECT count(*)::integer FROM agent_runs WHERE batch_id = comparison_batches.id) AS total,
+             (SELECT count(*)::integer FROM agent_runs WHERE batch_id = comparison_batches.id AND status = 'queued') AS queued,
+             (SELECT count(*)::integer FROM agent_runs WHERE batch_id = comparison_batches.id AND status = 'running') AS running,
+             (SELECT count(*)::integer FROM agent_runs WHERE batch_id = comparison_batches.id AND status = 'succeeded') AS succeeded,
+             (SELECT count(*)::integer FROM agent_runs WHERE batch_id = comparison_batches.id AND status IN ('agent_failed', 'infrastructure_failed', 'timed_out')) AS failed
+           FROM comparison_batches WHERE id = $1`, [batchId],
+        )).rows[0]);
+        if (progress === undefined) throw new AuthorizationError('not_found');
+        return { progress: { batch_id: progress.batchId, status: progress.status, stage: progress.stage, runs: { total: progress.total, queued: progress.queued, running: progress.running, succeeded: progress.succeeded, failed: progress.failed } } };
+      } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
+    });
+
     app.post('/v1/projects/:projectId/api-keys', async (request, reply) => {
       try {
         const body = apiKeySchema.safeParse(request.body);

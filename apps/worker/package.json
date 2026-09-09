@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@varytra/infrastructure": "workspace:*",
+    "@varytra/reference-environment": "workspace:*",
     "@varytra/runtime": "workspace:*",
     "@varytra/schemas": "workspace:*",
     "bullmq": "^6.3.4"

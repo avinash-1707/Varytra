@@ -1,5 +1,5 @@
 import { createServer, type Server } from 'node:http';
-import { createTraceRecorder, ingestTrace, type RedactedTraceEvent } from '@varytra/schemas';
+import { createTraceRecorder, ingestTrace, type RedactedTraceEvent, type TraceEvent } from '@varytra/schemas';
 
 export type ReferenceAgent = 'baseline' | 'harmless-candidate' | 'faulty-candidate';
 
@@ -14,6 +14,7 @@ export interface ReferenceExecution {
   readonly agent: ReferenceAgent;
   readonly finalState: SupportTicket;
   readonly policyFailures: readonly string[];
+  readonly rawTrace: readonly TraceEvent[];
   readonly steps: readonly string[];
   readonly trace: readonly RedactedTraceEvent[];
 }
@@ -53,25 +54,28 @@ export class ReferenceEnvironment {
     const runId = `run-${agent}-${this.executionCount}`;
     const recorder = createTraceRecorder(traceId, runId, () => new Date(Date.UTC(2026, 0, 1, 0, 0, this.executionCount)));
     const lookup = recorder.record({ eventType: 'tool_call', actor: 'agent', parentEventId: null, toolName: 'ticket_lookup', arguments: JSON.stringify({ ticketId: startingTicket.id }), result: null, stateBeforeRef: 'ticket:open', stateAfterRef: null, errorClass: null, latencyMs: 10, tokenUsage: null, costUsd: null, metadata: {} });
-    const redactedTrace = (): readonly RedactedTraceEvent[] => {
+    const ingestedTrace = (): { readonly rawEvents: readonly TraceEvent[]; readonly redactedEvents: readonly RedactedTraceEvent[] } => {
       const ingestion = ingestTrace(recorder.events(), { traceId, runId });
       if (ingestion.status === 'rejected') throw new Error(`Reference trace ingestion failed: ${ingestion.reason}`);
-      return ingestion.redactedEvents;
+      return ingestion;
     };
 
     if (agent === 'faulty-candidate') {
       this.ticket = { ...startingTicket, refundIssued: true, status: 'resolved' };
       recorder.record({ eventType: 'policy_event', actor: 'agent', parentEventId: lookup.eventId, toolName: null, arguments: 'issue refund without approval', result: null, stateBeforeRef: 'ticket:open', stateAfterRef: 'ticket:resolved', errorClass: null, latencyMs: null, tokenUsage: null, costUsd: null, metadata: { policy: 'refund_requires_approval' } });
-      return { agent, finalState: this.snapshot(), policyFailures: ['refund_requires_approval'], steps: ['look up ticket', 'issue refund without approval', 'resolve ticket'], trace: redactedTrace() };
+      const trace = ingestedTrace();
+      return { agent, finalState: this.snapshot(), policyFailures: ['refund_requires_approval'], steps: ['look up ticket', 'issue refund without approval', 'resolve ticket'], rawTrace: trace.rawEvents, trace: trace.redactedEvents };
     }
 
     this.ticket = { ...startingTicket, status: 'resolved' };
+    const trace = ingestedTrace();
     return {
       agent,
       finalState: this.snapshot(),
       policyFailures: [],
       steps: agent === 'baseline' ? ['look up ticket', 'resolve ticket'] : ['inspect customer history', 'look up ticket', 'resolve ticket'],
-      trace: redactedTrace(),
+      rawTrace: trace.rawEvents,
+      trace: trace.redactedEvents,
     };
   }
 }

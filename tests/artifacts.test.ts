@@ -85,6 +85,16 @@ describe('artifacts', () => {
     })).rejects.toBeInstanceOf(ArtifactAccessError);
   });
 
+  it('stores normalized traces as a separate derived artifact', async () => {
+    const transport = createTransport();
+    const storage = createArtifactStorage(transport, tombstones);
+    const artifact = await storage.write({
+      owner: { organizationId, projectId: 'project-a', batchId: 'batch-a', runId: 'run-a' },
+      kind: 'normalized-trace', content: new TextEncoder().encode('{"eventType":"tool_call"}\n'), schemaVersion: '1.0', classification: 'internal', retentionDeadline: new Date('2026-12-31T00:00:00.000Z'), creatorId: 'worker',
+    });
+    expect(artifact.key).toBe(`org/${organizationId}/project/project-a/batch/batch-a/run/run-a/normalized.jsonl`);
+  });
+
   it('uses authenticated raw Cloudinary assets with context-only metadata', async () => {
     let uploadOptions: Readonly<Record<string, unknown>> | undefined;
     let destroyedPublicId: string | undefined;

@@ -2,7 +2,24 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import { withOrganizationTransaction } from './index.js';
 
-type TerminalRunStatus = 'succeeded' | 'agent_failed' | 'infrastructure_failed' | 'timed_out';
+export type TerminalRunStatus = 'succeeded' | 'agent_failed' | 'infrastructure_failed' | 'timed_out';
+export type ProgressStage = 'queued' | 'preparing_fixture' | 'running_baseline' | 'running_candidate' | 'complete' | 'failed';
+
+export interface RunArtifactLineage {
+  readonly classification: 'restricted' | 'sensitive' | 'internal';
+  readonly contentHash: string;
+  readonly kind: 'raw-trace' | 'redacted-trace' | 'normalized-trace';
+  readonly schemaVersion: string;
+  readonly storageRef: string;
+}
+
+export interface SafeRunMetrics {
+  readonly costUsd: number;
+  readonly durationMs: number;
+  readonly eventCount: number;
+  readonly tokenUsage: number;
+  readonly toolCallCount: number;
+}
 
 export class SchedulingError extends Error {
   public constructor(public readonly code: 'idempotency_key_reused' | 'invalid_request' | 'not_found' | 'unschedulable_agent') {
@@ -127,12 +144,13 @@ export interface WorkerClaimInput {
 export interface ClaimedRun {
   readonly leaseToken: string;
   readonly runId: string;
+  readonly side: 'baseline' | 'candidate';
 }
 
 export async function claimRun(pool: Pool, input: WorkerClaimInput): Promise<ClaimedRun | undefined> {
   return withOrganizationTransaction(pool, input.organizationId, async (client) => {
-    const dispatched = await client.query<Readonly<{ endpointKey: string; status: string }>>(
-      `SELECT run.endpoint_key AS "endpointKey", run.status FROM agent_run_dispatches dispatch
+    const dispatched = await client.query<Readonly<{ endpointKey: string; side: 'baseline' | 'candidate'; status: string }>>(
+      `SELECT run.endpoint_key AS "endpointKey", run.side, run.status FROM agent_run_dispatches dispatch
        JOIN agent_runs run ON run.id = dispatch.run_id
        WHERE dispatch.id = $1 AND dispatch.run_id = $2 FOR UPDATE`, [input.dispatchId, input.runId],
     );
@@ -154,39 +172,85 @@ export async function claimRun(pool: Pool, input: WorkerClaimInput): Promise<Cla
     );
     if (claimed.rowCount !== 1) return undefined;
     await client.query("UPDATE agent_run_dispatches SET status = 'handled', handled_at = now() WHERE id = $1 AND status IN ('ready', 'published')", [input.dispatchId]);
-    await client.query("UPDATE comparison_batches SET status = 'running', started_at = COALESCE(started_at, now()) WHERE id = $1 AND status = 'queued'", [claimed.rows[0]!.batch_id]);
-    return { runId: input.runId, leaseToken };
+    const stage: ProgressStage = run.side === 'baseline' ? 'running_baseline' : 'running_candidate';
+    await client.query("UPDATE comparison_batches SET status = 'running', progress_stage = $2, started_at = COALESCE(started_at, now()) WHERE id = $1 AND status = 'queued'", [claimed.rows[0]!.batch_id, stage]);
+    await client.query('UPDATE agent_runs SET progress_stage = $2 WHERE id = $1', [input.runId, stage]);
+    await client.query('INSERT INTO comparison_batch_progress (organization_id, project_id, batch_id, run_id, stage) SELECT organization_id, project_id, batch_id, id, $2 FROM agent_runs WHERE id = $1', [input.runId, stage]);
+    return { runId: input.runId, leaseToken, side: run.side };
   });
 }
 
 export async function finishRun(pool: Pool, organizationId: string, runId: string, leaseToken: string, status: TerminalRunStatus): Promise<boolean> {
   return withOrganizationTransaction(pool, organizationId, async (client) => {
     const completed = await client.query<Readonly<{ batchId: string }>>(
-      `UPDATE agent_runs SET status = $3, lease_token = NULL, lease_expires_at = NULL, finished_at = now(), updated_at = now()
+      `UPDATE agent_runs SET status = $3, progress_stage = CASE WHEN $3 = 'succeeded' THEN 'complete' ELSE 'failed' END, lease_token = NULL, lease_expires_at = NULL, finished_at = now(), updated_at = now()
        WHERE id = $1 AND lease_token = $2 AND status = 'running' RETURNING batch_id AS "batchId"`, [runId, leaseToken, status],
     );
     const batchId = completed.rows[0]?.batchId;
     if (batchId === undefined) return false;
+    await client.query('INSERT INTO comparison_batch_progress (organization_id, project_id, batch_id, run_id, stage) SELECT organization_id, project_id, batch_id, id, CASE WHEN $2 = \'succeeded\' THEN \'complete\' ELSE \'failed\' END FROM agent_runs WHERE id = $1', [runId, status]);
     await client.query(
-      `UPDATE comparison_batches SET status = 'completed', completed_at = now()
+      `UPDATE comparison_batches SET status = 'completed', progress_stage = CASE WHEN EXISTS (SELECT 1 FROM agent_runs WHERE batch_id = $1 AND status <> 'succeeded') THEN 'failed' ELSE 'complete' END, completed_at = now()
        WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM agent_runs WHERE batch_id = $1 AND status NOT IN ('succeeded', 'agent_failed', 'infrastructure_failed', 'timed_out'))`, [batchId],
     );
     return true;
   });
 }
 
+export async function setRunProgress(pool: Pool, organizationId: string, runId: string, leaseToken: string, stage: Extract<ProgressStage, 'preparing_fixture' | 'running_baseline' | 'running_candidate'>): Promise<boolean> {
+  return withOrganizationTransaction(pool, organizationId, async (client) => {
+    const updated = await client.query<Readonly<{ batchId: string; projectId: string }>>(
+      `UPDATE agent_runs SET progress_stage = $3, updated_at = now()
+       WHERE id = $1 AND lease_token = $2 AND status = 'running'
+       RETURNING batch_id AS "batchId", project_id AS "projectId"`, [runId, leaseToken, stage],
+    );
+    const run = updated.rows[0];
+    if (run === undefined) return false;
+    await client.query('UPDATE comparison_batches SET progress_stage = $2 WHERE id = $1 AND status = \'running\'', [run.batchId, stage]);
+    await client.query('INSERT INTO comparison_batch_progress (organization_id, project_id, batch_id, run_id, stage) VALUES ($1, $2, $3, $4, $5)', [organizationId, run.projectId, run.batchId, runId, stage]);
+    return true;
+  });
+}
+
+export async function completeRunWithArtifacts(pool: Pool, organizationId: string, runId: string, leaseToken: string, artifacts: readonly RunArtifactLineage[], metrics: SafeRunMetrics): Promise<boolean> {
+  if (artifacts.length !== 3 || new Set(artifacts.map((artifact) => artifact.kind)).size !== 3) throw new SchedulingError('invalid_request');
+  return withOrganizationTransaction(pool, organizationId, async (client) => {
+    const run = await client.query<Readonly<{ batchId: string; projectId: string }>>('SELECT batch_id AS "batchId", project_id AS "projectId" FROM agent_runs WHERE id = $1 AND lease_token = $2 AND status = \'running\' FOR UPDATE', [runId, leaseToken]);
+    const row = run.rows[0];
+    if (row === undefined) return false;
+    for (const artifact of artifacts) {
+      await client.query(
+        `INSERT INTO agent_run_artifacts (organization_id, project_id, batch_id, run_id, kind, storage_ref, content_hash, schema_version, classification)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [organizationId, row.projectId, row.batchId, runId, artifact.kind, artifact.storageRef, artifact.contentHash, artifact.schemaVersion, artifact.classification],
+      );
+    }
+    await client.query(
+      `UPDATE agent_runs SET status = 'succeeded', progress_stage = 'complete', event_count = $3, tool_call_count = $4, duration_ms = $5, token_usage = $6, cost_usd = $7, lease_token = NULL, lease_expires_at = NULL, finished_at = now(), updated_at = now() WHERE id = $1 AND lease_token = $2`,
+      [runId, leaseToken, metrics.eventCount, metrics.toolCallCount, metrics.durationMs, metrics.tokenUsage, metrics.costUsd],
+    );
+    await client.query("INSERT INTO comparison_batch_progress (organization_id, project_id, batch_id, run_id, stage) VALUES ($1, $2, $3, $4, 'complete')", [organizationId, row.projectId, row.batchId, runId]);
+    await client.query(`UPDATE comparison_batches SET status = 'completed', progress_stage = CASE WHEN EXISTS (SELECT 1 FROM agent_runs WHERE batch_id = $1 AND status <> 'succeeded') THEN 'failed' ELSE 'complete' END, completed_at = now() WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM agent_runs WHERE batch_id = $1 AND status NOT IN ('succeeded', 'agent_failed', 'infrastructure_failed', 'timed_out'))`, [row.batchId]);
+    return true;
+  });
+}
+
 export async function recoverExpiredRuns(pool: Pool, organizationId: string): Promise<number> {
   return withOrganizationTransaction(pool, organizationId, async (client) => {
-    const expired = await client.query<Readonly<{ id: string; projectId: string; retrySafe: boolean; attemptCount: number; maxAttempts: number }>>(
-      `SELECT id, project_id AS "projectId", retry_safe AS "retrySafe", attempt_count AS "attemptCount", max_attempts AS "maxAttempts"
+    const expired = await client.query<Readonly<{ batchId: string; id: string; projectId: string; retrySafe: boolean; attemptCount: number; maxAttempts: number }>>(
+      `SELECT id, batch_id AS "batchId", project_id AS "projectId", retry_safe AS "retrySafe", attempt_count AS "attemptCount", max_attempts AS "maxAttempts"
        FROM agent_runs WHERE status = 'running' AND lease_expires_at <= now() FOR UPDATE SKIP LOCKED`,
     );
     for (const run of expired.rows) {
       if (run.retrySafe && run.attemptCount < run.maxAttempts) {
         await client.query("UPDATE agent_runs SET status = 'queued', lease_token = NULL, lease_expires_at = NULL, available_at = now(), updated_at = now() WHERE id = $1", [run.id]);
         await client.query("UPDATE agent_run_dispatches SET status = 'ready', available_at = now(), published_at = NULL, handled_at = NULL WHERE run_id = $1", [run.id]);
+        await client.query("UPDATE agent_runs SET progress_stage = 'queued' WHERE id = $1", [run.id]);
+        await client.query("INSERT INTO comparison_batch_progress (organization_id, project_id, batch_id, run_id, stage) VALUES ($1, $2, $3, $4, 'queued')", [organizationId, run.projectId, run.batchId, run.id]);
       } else {
-        await client.query("UPDATE agent_runs SET status = 'infrastructure_failed', failure_code = 'lease_expired', lease_token = NULL, lease_expires_at = NULL, finished_at = now(), updated_at = now() WHERE id = $1", [run.id]);
+        await client.query("UPDATE agent_runs SET status = 'infrastructure_failed', progress_stage = 'failed', failure_code = 'lease_expired', lease_token = NULL, lease_expires_at = NULL, finished_at = now(), updated_at = now() WHERE id = $1", [run.id]);
+        await client.query("INSERT INTO comparison_batch_progress (organization_id, project_id, batch_id, run_id, stage) VALUES ($1, $2, $3, $4, 'failed')", [organizationId, run.projectId, run.batchId, run.id]);
+        await client.query(`UPDATE comparison_batches SET status = 'completed', progress_stage = 'failed', completed_at = now() WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM agent_runs WHERE batch_id = $1 AND status NOT IN ('succeeded', 'agent_failed', 'infrastructure_failed', 'timed_out'))`, [run.batchId]);
       }
     }
     return expired.rowCount ?? 0;
