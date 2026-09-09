@@ -121,6 +121,9 @@ importers:
       '@varytra/infrastructure':
         specifier: workspace:*
         version: link:../../packages/infrastructure
+      '@varytra/normalization':
+        specifier: workspace:*
+        version: link:../../packages/normalization
       '@varytra/reference-environment':
         specifier: workspace:*
         version: link:../../packages/reference-environment

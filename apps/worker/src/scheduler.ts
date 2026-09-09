@@ -2,6 +2,7 @@ import { Queue, Worker } from 'bullmq';
 import { createDatabasePool, withOrganizationTransaction, type ArtifactStorage } from '@varytra/infrastructure';
 import { claimRun, completeRunWithArtifacts, finishRun, readyOrganizationDispatches, recoverExpiredRuns, setRunProgress, type ClaimedRun, type SafeRunMetrics } from '@varytra/infrastructure/scheduling';
 import { ReferenceEnvironment } from '@varytra/reference-environment';
+import { normalizeTrace } from '@varytra/normalization';
 import { runDispatchSchema, type RunDispatch } from '@varytra/schemas';
 
 const queueName = 'varytra-agent-runs';
@@ -29,15 +30,7 @@ export const executeReferenceRun: RunExecutor = async ({ side }) => {
   environment.reset();
   const execution = environment.execute(side === 'baseline' ? 'baseline' : 'harmless-candidate');
   const trace = execution.trace;
-  const normalized = trace.map((event) => ({
-    actor: event.actor,
-    errorClass: event.errorClass,
-    eventType: event.eventType,
-    sequenceNo: event.sequenceNo,
-    stateAfterRef: event.stateAfterRef,
-    stateBeforeRef: event.stateBeforeRef,
-    toolName: event.toolName,
-  }));
+  const normalized = normalizeTrace(trace);
   return {
     rawTrace: serializeLines(execution.rawTrace),
     redactedTrace: serializeLines(trace),
