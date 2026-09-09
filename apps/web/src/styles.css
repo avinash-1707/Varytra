@@ -783,6 +783,311 @@ footer {
   font-style: italic;
 }
 
+.batch-progress-pane {
+  grid-column: 2 / span 10;
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 24px 32px;
+  margin-top: 32px;
+  border-top: 2px solid #171716;
+  border-bottom: 1px solid #c9c6be;
+  background: #fffefa;
+}
+
+.batch-progress-pane-heading {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  padding: 16px;
+  border-right: 1px solid #c9c6be;
+}
+
+.batch-progress-pane-heading .eyebrow {
+  margin-bottom: 4px;
+}
+
+.batch-progress-pane-heading > p:last-child {
+  max-width: 340px;
+  margin-bottom: 0;
+  color: #5e5c56;
+  font-size: 14px;
+  line-height: 21px;
+}
+
+.batch-progress-record,
+.batch-progress-state,
+.batch-progress-loading {
+  grid-column: 2;
+}
+
+.batch-progress-record {
+  border-left: 1px solid #c9c6be;
+  animation: project-state-enter 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.batch-progress-summary {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 136px;
+  padding: 16px;
+  border-bottom: 1px solid #c9c6be;
+}
+
+.batch-progress-summary .eyebrow,
+.batch-accounting-section .eyebrow,
+.batch-current-stage .eyebrow {
+  margin-bottom: 8px;
+}
+
+.batch-progress-summary h3,
+.batch-progress-state h3 {
+  max-width: 500px;
+  margin-bottom: 8px;
+  font-size: 24px;
+  font-weight: 550;
+  letter-spacing: -0.03em;
+  line-height: 30px;
+}
+
+.batch-progress-summary > div > p:last-child,
+.batch-progress-state > p:last-of-type {
+  max-width: 570px;
+  margin-bottom: 0;
+  color: #5e5c56;
+  font-size: 14px;
+  line-height: 21px;
+}
+
+.batch-status-tag {
+  flex: none;
+  padding: 3px 6px;
+  border: 1px solid #005b9a;
+  color: #005b9a;
+  font-family: "Geist Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  line-height: 14px;
+  text-transform: uppercase;
+}
+
+.batch-status-tag--complete {
+  border-color: #237348;
+  color: #237348;
+}
+
+.batch-status-tag--failed {
+  border-color: #c83e2d;
+  color: #c83e2d;
+}
+
+.batch-current-stage {
+  display: grid;
+  gap: 2px;
+  padding: 16px;
+  border-bottom: 1px solid #2a2926;
+  background: #eceae4;
+}
+
+.batch-current-stage .eyebrow {
+  color: #5e5c56;
+}
+
+.batch-current-stage strong {
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  line-height: 22px;
+}
+
+.batch-stage-ledger {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.batch-stage {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #c9c6be;
+}
+
+.batch-stage-marker,
+.batch-stage-state,
+.batch-identifier,
+.batch-run-accounting dt,
+.batch-run-accounting dd {
+  font-family: "Geist Mono", "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.batch-stage-marker {
+  color: #9a978e;
+  font-size: 14px;
+  text-align: center;
+}
+
+.batch-stage-name {
+  font-size: 14px;
+  line-height: 21px;
+}
+
+.batch-stage-state {
+  color: #5e5c56;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  line-height: 14px;
+  text-transform: uppercase;
+}
+
+.batch-stage--observed .batch-stage-marker,
+.batch-stage--observed .batch-stage-state {
+  color: #237348;
+}
+
+.batch-stage--current {
+  border-left: 2px solid #005b9a;
+  padding-left: 14px;
+  background: #d7e9f5;
+}
+
+.batch-stage--current .batch-stage-marker,
+.batch-stage--current .batch-stage-state {
+  color: #005b9a;
+}
+
+.batch-progress-record--failed .batch-current-stage {
+  border-left: 2px solid #c83e2d;
+  background: #f7ddd8;
+}
+
+.batch-accounting-section {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 16px;
+  padding: 16px;
+  border-bottom: 1px solid #c9c6be;
+}
+
+.batch-accounting-section > div > p:last-child {
+  max-width: 265px;
+  margin-bottom: 0;
+  color: #5e5c56;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.batch-run-accounting {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  margin: 0;
+}
+
+.batch-run-accounting > div {
+  min-width: 0;
+  padding-left: 12px;
+  border-left: 1px solid #c9c6be;
+}
+
+.batch-run-accounting dt {
+  margin-bottom: 2px;
+  color: #5e5c56;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  line-height: 14px;
+  text-transform: uppercase;
+}
+
+.batch-run-accounting dd {
+  margin: 0;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  line-height: 22px;
+}
+
+.batch-identifier {
+  margin: 0;
+  padding: 12px 16px;
+  overflow-wrap: anywhere;
+  color: #5e5c56;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.batch-identifier span {
+  color: #171716;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.batch-progress-state,
+.batch-progress-loading {
+  min-height: 280px;
+}
+
+.batch-progress-state {
+  align-self: stretch;
+  padding: 32px 16px;
+  border-left: 1px solid #c9c6be;
+  animation: project-state-enter 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.batch-progress-state .eyebrow {
+  margin-bottom: 8px;
+}
+
+.batch-progress-state--error {
+  border-left: 2px solid #a85d00;
+  background: #f7e7c8;
+}
+
+.batch-progress-state--permission {
+  border-left: 2px solid #c83e2d;
+  background: #f7ddd8;
+}
+
+.batch-progress-retry {
+  margin-top: 24px;
+}
+
+.batch-progress-loading {
+  display: grid;
+  align-content: center;
+  gap: 12px;
+  padding: 16px;
+  border-left: 1px solid #c9c6be;
+}
+
+.batch-progress-loading span {
+  display: block;
+  height: 12px;
+  background: #eceae4;
+}
+
+.batch-progress-loading span:nth-child(1) {
+  width: 42%;
+}
+
+.batch-progress-loading span:nth-child(2) {
+  width: 76%;
+}
+
+.batch-progress-loading span:nth-child(3) {
+  width: 60%;
+}
+
+.batch-progress-loading span:nth-child(4) {
+  width: 84%;
+}
+
 @media (max-width: 900px) {
   .version-pane {
     grid-column: 1 / -1;
@@ -791,6 +1096,23 @@ footer {
 
   .version-controls {
     grid-template-columns: 1fr;
+  }
+
+  .batch-progress-pane {
+    grid-column: 1 / -1;
+    grid-template-columns: 1fr;
+  }
+
+  .batch-progress-pane-heading {
+    border-right: 0;
+    border-bottom: 1px solid #c9c6be;
+  }
+
+  .batch-progress-record,
+  .batch-progress-state,
+  .batch-progress-loading {
+    grid-column: 1;
+    border-left: 0;
   }
 }
 
@@ -905,6 +1227,35 @@ footer {
     margin-top: 24px;
     padding: 16px 0;
     background: transparent;
+  }
+
+  .batch-progress-pane {
+    gap: 0;
+    margin-top: 24px;
+    background: transparent;
+  }
+
+  .batch-progress-pane-heading {
+    padding-inline: 0;
+  }
+
+  .batch-progress-record,
+  .batch-progress-state,
+  .batch-progress-loading {
+    min-height: 0;
+  }
+
+  .batch-progress-summary {
+    align-items: start;
+    flex-direction: column;
+  }
+
+  .batch-accounting-section {
+    grid-template-columns: 1fr;
+  }
+
+  .batch-accounting-section > div > p:last-child {
+    max-width: 440px;
   }
 
   .version-pane-heading,

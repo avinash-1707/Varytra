@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useState } from 'react';
+import { type FormEvent, useEffect, useMemo, useState } from 'react';
 
 const ORGANIZATION_STORAGE_KEY = 'x-varytra-organization';
 
@@ -39,6 +39,25 @@ export type VersionSelectionState =
   | { status: 'error' }
   | { status: 'permission' };
 
+export type ComparisonBatchProgress = {
+  id: string;
+  status: string;
+  runCount: number;
+  completedRunCount: number;
+  failedRunCount: number;
+  runningRunCount: number;
+  stage: string;
+};
+
+export type BatchProgressState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'ready'; batch: ComparisonBatchProgress }
+  | { status: 'failed'; batch: ComparisonBatchProgress }
+  | { status: 'complete'; batch: ComparisonBatchProgress }
+  | { status: 'error' }
+  | { status: 'permission' };
+
 type CreationState =
   | { status: 'idle' }
   | { status: 'submitting' }
@@ -49,6 +68,12 @@ type CreationState =
 class ProjectApiError extends Error {
   public constructor(public readonly status: number) {
     super(`Project request failed with status ${status}.`);
+  }
+}
+
+class BatchProgressApiError extends Error {
+  public constructor(public readonly status: number) {
+    super(`Batch progress request failed with status ${status}.`);
   }
 }
 
@@ -66,6 +91,10 @@ function readOptionalVersion(value: unknown): string | null {
   }
 
   return readOptionalString(value);
+}
+
+function readNonNegativeInteger(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 function readFirstString(record: Record<string, unknown>, keys: readonly string[]): string | null {
@@ -180,6 +209,27 @@ export function parseAgentVersionsResponse(response: unknown): AgentVersion[] {
   return response.agent_versions.map(parseAgentVersion);
 }
 
+export function parseComparisonBatchProgressResponse(response: unknown): ComparisonBatchProgress {
+  if (!isRecord(response) || !isRecord(response.batch)) {
+    throw new TypeError('Batch progress response must contain a batch object.');
+  }
+
+  const { batch } = response;
+  const id = readOptionalString(batch.id);
+  const status = readOptionalString(batch.status);
+  const stage = readOptionalString(batch.stage);
+  const runCount = readNonNegativeInteger(batch.run_count);
+  const completedRunCount = readNonNegativeInteger(batch.completed_run_count);
+  const failedRunCount = readNonNegativeInteger(batch.failed_run_count);
+  const runningRunCount = readNonNegativeInteger(batch.running_run_count);
+
+  if (!id || !status || !stage || runCount === null || completedRunCount === null || failedRunCount === null || runningRunCount === null) {
+    throw new TypeError('Batch progress response is missing required safe progress fields.');
+  }
+
+  return { id, status, runCount, completedRunCount, failedRunCount, runningRunCount, stage };
+}
+
 function parseCreatedProjectResponse(response: unknown): Project {
   if (isRecord(response) && 'project' in response) {
     return parseProject(response.project);
@@ -205,6 +255,64 @@ export function getVersionSelectionStateContent(status: Exclude<VersionSelection
       body: 'Ask an organization owner or admin to confirm your project access. Version details remain unavailable.',
     },
   }[status];
+}
+
+export function getBatchProgressStateContent(status: Exclude<BatchProgressState['status'], 'loading' | 'ready'>): Readonly<{ label: string; heading: string; body: string }> {
+  return {
+    idle: {
+      label: 'No live batch selected',
+      heading: 'Open a comparison batch to observe its execution',
+      body: 'Batch progress is available from an authorized batch record. This pane never shows trace content or artifact links.',
+    },
+    error: {
+      label: 'Progress unavailable',
+      heading: 'The safe batch-progress record could not be loaded',
+      body: 'Check the connection and try again. No trace, artifact, or run content was shown while the request failed.',
+    },
+    permission: {
+      label: 'Access restricted',
+      heading: 'You do not have access to this batch progress',
+      body: 'Ask an organization owner or admin to confirm your access. Batch details remain unavailable.',
+    },
+    failed: {
+      label: 'Execution failed',
+      heading: 'This batch ended in a failed state',
+      body: 'The run accounting below is the safe persisted progress projection. It does not disclose trace or artifact content.',
+    },
+    complete: {
+      label: 'Batch complete',
+      heading: 'Execution stages are complete',
+      body: 'The run accounting below records the completed batch without exposing trace or artifact content.',
+    },
+  }[status];
+}
+
+export function getBatchProgressRequestState(status: number): 'permission' | 'error' {
+  return status === 401 || status === 403 ? 'permission' : 'error';
+}
+
+export function isTerminalBatchStatus(status: string): boolean {
+  return ['complete', 'completed', 'failed', 'cancelled', 'canceled'].includes(status.trim().toLowerCase());
+}
+
+export function isTerminalBatchProgress(batch: ComparisonBatchProgress): boolean {
+  const stage = normalizeStage(batch.stage);
+  return isTerminalBatchStatus(batch.status) || stage === 'complete' || stage === 'completed' || stage === 'failed';
+}
+
+export function getBatchProgressStateFromBatch(batch: ComparisonBatchProgress): Extract<BatchProgressState, { status: 'ready' | 'failed' | 'complete' }> {
+  const status = batch.status.trim().toLowerCase();
+  const stage = normalizeStage(batch.stage);
+
+  if (status === 'complete' || status === 'completed' || stage === 'complete' || stage === 'completed') {
+    return { status: 'complete', batch };
+  }
+
+  if (status === 'failed' || status === 'cancelled' || status === 'canceled' || stage === 'failed') {
+    return { status: 'failed', batch };
+  }
+
+  return { status: 'ready', batch };
 }
 
 export function getProjectStateContent(status: Exclude<ProjectListState['status'], 'loading' | 'ready'>): Readonly<{ label: string; heading: string; body: string }> {
@@ -242,6 +350,14 @@ function readOrganizationId(): string | null {
 
 function readOrganizationName(): string {
   return readOrganizationId() ?? 'Personal workspace';
+}
+
+export function readBatchIdFromSearch(search: string): string | null {
+  return readOptionalString(new URLSearchParams(search).get('batchId'));
+}
+
+function readBatchId(): string | null {
+  return typeof window === 'undefined' ? null : readBatchIdFromSearch(window.location.search);
 }
 
 function formatUpdatedAt(updatedAt: string | null): string {
@@ -303,6 +419,21 @@ async function requestVersionData(projectId: string, signal: AbortSignal): Promi
     scenarioVersions: parseScenarioVersionsResponse(scenarioBody),
     agentVersions: parseAgentVersionsResponse(agentBody),
   };
+}
+
+async function requestBatchProgress(batchId: string, signal: AbortSignal): Promise<ComparisonBatchProgress> {
+  const response = await fetch(`/v1/comparison-batches/${encodeURIComponent(batchId)}/progress`, {
+    credentials: 'include',
+    headers: getRequestHeaders(),
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new BatchProgressApiError(response.status);
+  }
+
+  const body: unknown = await response.json();
+  return parseComparisonBatchProgressResponse(body);
 }
 
 function ProjectTable({ projects }: { projects: Project[] }) {
@@ -542,6 +673,159 @@ function VersionSelectionControls({
   );
 }
 
+const BATCH_STAGES = [
+  { key: 'queued', label: 'Queued' },
+  { key: 'preparing_fixture', label: 'Preparing fixture' },
+  { key: 'running_baseline', label: 'Running baseline' },
+  { key: 'running_candidate', label: 'Running candidate' },
+  { key: 'aligning', label: 'Aligning' },
+  { key: 'checking_policies', label: 'Checking policies' },
+  { key: 'reviewing_semantic_differences', label: 'Reviewing semantic differences' },
+  { key: 'complete', label: 'Complete' },
+] as const;
+
+function normalizeStage(stage: string): string {
+  return stage.trim().toLowerCase().replace(/[\s-]+/g, '_');
+}
+
+export function getBatchStageLabel(stage: string): string {
+  const normalizedStage = normalizeStage(stage);
+  const knownStage = BATCH_STAGES.find(({ key }) => key === normalizedStage);
+
+  if (knownStage) {
+    return knownStage.label;
+  }
+
+  return stage
+    .trim()
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((word) => `${word.slice(0, 1).toUpperCase()}${word.slice(1).toLowerCase()}`)
+    .join(' ');
+}
+
+function BatchStageLedger({ batch, state }: Readonly<{
+  batch: ComparisonBatchProgress;
+  state: Extract<BatchProgressState, { status: 'ready' | 'failed' | 'complete' }>['status'];
+}>) {
+  const currentStageIndex = BATCH_STAGES.findIndex(({ key }) => key === normalizeStage(batch.stage));
+  const isComplete = state === 'complete';
+
+  return (
+    <ol className="batch-stage-ledger" aria-label="Comparison batch stages">
+      {BATCH_STAGES.map((stage, index) => {
+        const isCurrent = !isComplete && currentStageIndex === index;
+        const isObserved = isComplete || (currentStageIndex !== -1 && index < currentStageIndex);
+        const stateLabel = isCurrent ? 'Current' : isObserved ? 'Observed' : 'Awaiting';
+
+        return (
+          <li key={stage.key} className={`batch-stage batch-stage--${isCurrent ? 'current' : isObserved ? 'observed' : 'awaiting'}`} aria-current={isCurrent ? 'step' : undefined}>
+            <span className="batch-stage-marker" aria-hidden="true">{isCurrent ? '→' : isObserved ? '•' : '·'}</span>
+            <span className="batch-stage-name">{stage.label}</span>
+            <span className="batch-stage-state">{stateLabel}</span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function BatchRunAccounting({ batch }: { batch: ComparisonBatchProgress }) {
+  return (
+    <dl className="batch-run-accounting">
+      <div>
+        <dt>Run count</dt>
+        <dd>{batch.runCount}</dd>
+      </div>
+      <div>
+        <dt>Completed</dt>
+        <dd>{batch.completedRunCount}</dd>
+      </div>
+      <div>
+        <dt>Running</dt>
+        <dd>{batch.runningRunCount}</dd>
+      </div>
+      <div>
+        <dt>Failed</dt>
+        <dd>{batch.failedRunCount}</dd>
+      </div>
+    </dl>
+  );
+}
+
+function BatchProgressRecord({ state, batch }: Readonly<{
+  state: Extract<BatchProgressState, { status: 'ready' | 'failed' | 'complete' }>['status'];
+  batch: ComparisonBatchProgress;
+}>) {
+  const copy = state === 'ready'
+    ? {
+        label: 'Live execution',
+        heading: 'Batch is progressing through recorded stages',
+        body: 'Stage and run counts are refreshed from the authorized safe projection. Counts are reported as recorded, not converted into a progress percentage.',
+      }
+    : getBatchProgressStateContent(state);
+  const stageLabel = getBatchStageLabel(batch.stage);
+
+  return (
+    <div className={`batch-progress-record batch-progress-record--${state}`}>
+      <div className="batch-progress-summary">
+        <div>
+          <p className="eyebrow">{copy.label}</p>
+          <h3>{copy.heading}</h3>
+          <p>{copy.body}</p>
+        </div>
+        <span className={`batch-status-tag batch-status-tag--${state}`}>
+          {state === 'ready' ? 'In progress' : state === 'complete' ? 'Complete' : 'Failed'}
+        </span>
+      </div>
+
+      <div className="batch-current-stage" role="status" aria-live="polite">
+        <span className="eyebrow">Current recorded stage</span>
+        <strong>{stageLabel}</strong>
+      </div>
+
+      <BatchStageLedger batch={batch} state={state} />
+
+      <div className="batch-accounting-section">
+        <div>
+          <p className="eyebrow">Safe run accounting</p>
+          <p>These counts describe execution state only. They do not reveal run output, trace payloads, or artifacts.</p>
+        </div>
+        <BatchRunAccounting batch={batch} />
+      </div>
+
+      <p className="batch-identifier"><span>Batch ID</span> {batch.id}</p>
+    </div>
+  );
+}
+
+export function BatchProgressStateView({ state, onRetry }: Readonly<{
+  state: BatchProgressState;
+  onRetry: () => void;
+}>) {
+  if (state.status === 'loading') {
+    return (
+      <div className="batch-progress-loading" aria-busy="true" aria-label="Loading batch progress">
+        <span /><span /><span /><span />
+      </div>
+    );
+  }
+
+  if (state.status === 'ready' || state.status === 'failed' || state.status === 'complete') {
+    return <BatchProgressRecord state={state.status} batch={state.batch} />;
+  }
+
+  const copy = getBatchProgressStateContent(state.status);
+  return (
+    <section className={`batch-progress-state batch-progress-state--${state.status}`} aria-labelledby="batch-progress-state-title">
+      <p className="eyebrow">{copy.label}</p>
+      <h3 id="batch-progress-state-title">{copy.heading}</h3>
+      <p>{copy.body}</p>
+      {state.status === 'error' && <button type="button" className="batch-progress-retry" onClick={onRetry}>Retry progress request</button>}
+    </section>
+  );
+}
+
 export function App() {
   const [organizationName] = useState(readOrganizationName);
   const [projectState, setProjectState] = useState<ProjectListState>({ status: 'loading' });
@@ -553,6 +837,9 @@ export function App() {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [creationState, setCreationState] = useState<CreationState>({ status: 'idle' });
+  const batchId = useMemo(readBatchId, []);
+  const [batchProgressState, setBatchProgressState] = useState<BatchProgressState>(() => batchId === null ? { status: 'idle' } : { status: 'loading' });
+  const [batchProgressRetryKey, setBatchProgressRetryKey] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -599,6 +886,47 @@ export function App() {
 
     return () => controller.abort();
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (batchId === null) {
+      setBatchProgressState({ status: 'idle' });
+      return;
+    }
+
+    const controller = new AbortController();
+    let pollTimer: number | undefined;
+
+    const poll = (): void => {
+      void requestBatchProgress(batchId, controller.signal)
+        .then((batch) => {
+          const nextState = getBatchProgressStateFromBatch(batch);
+          setBatchProgressState(nextState);
+
+          if (!isTerminalBatchProgress(batch)) {
+            pollTimer = window.setTimeout(poll, 4_000);
+          }
+        })
+        .catch((error: unknown) => {
+          if (controller.signal.aborted) {
+            return;
+          }
+
+          setBatchProgressState({
+            status: error instanceof BatchProgressApiError ? getBatchProgressRequestState(error.status) : 'error',
+          });
+        });
+    };
+
+    setBatchProgressState({ status: 'loading' });
+    poll();
+
+    return () => {
+      controller.abort();
+      if (pollTimer !== undefined) {
+        window.clearTimeout(pollTimer);
+      }
+    };
+  }, [batchId, batchProgressRetryKey]);
 
   function handleProjectSelection(projectId: string) {
     setSelectedProjectId(projectId);
@@ -744,6 +1072,17 @@ export function App() {
             onCandidateVersionChange={handleCandidateVersionChange}
           />
         ) : <VersionSelectionStateView state={versionState} />}
+      </section>
+
+      <section className="batch-progress-pane" aria-labelledby="batch-progress-title">
+        <div className="batch-progress-pane-heading">
+          <div>
+            <p className="eyebrow">Comparison batch / safe projection</p>
+            <h2 id="batch-progress-title">Execution progress</h2>
+          </div>
+          <p>Observe the batch stage and exact run accounting without opening raw traces or artifacts.</p>
+        </div>
+        <BatchProgressStateView state={batchProgressState} onRetry={() => setBatchProgressRetryKey((current) => current + 1)} />
       </section>
 
       <section className="create-pane" aria-labelledby="create-project-title">
