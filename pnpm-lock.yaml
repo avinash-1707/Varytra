@@ -20,6 +20,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.7
         version: 19.2.7(@types/react@19.2.18)
+      '@varytra/alignment':
+        specifier: workspace:*
+        version: link:packages/alignment
       '@varytra/evaluation':
         specifier: workspace:*
         version: link:packages/evaluation
@@ -136,6 +139,12 @@ importers:
       bullmq:
         specifier: ^6.3.4
         version: 6.3.4(pg@8.23.0)
+
+  packages/alignment:
+    dependencies:
+      '@varytra/normalization':
+        specifier: workspace:*
+        version: link:../normalization
 
   packages/evaluation:
     dependencies:
