@@ -1,0 +1,56 @@
+name: Varytra release gate
+description: Start an evidence-backed Varytra comparison and expose its opaque CI run ID.
+inputs:
+  api-url:
+    description: Varytra API origin
+    required: true
+  api-key:
+    description: Project-scoped Varytra CI key
+    required: true
+  project-id:
+    description: Varytra project UUID
+    required: true
+  baseline-agent-version-id:
+    description: Immutable baseline agent version UUID
+    required: true
+  candidate-agent-version-id:
+    description: Immutable candidate agent version UUID
+    required: true
+  scenario-version-ids:
+    description: Comma-separated immutable scenario version UUIDs
+    required: true
+  idempotency-key:
+    description: Stable key for this CI attempt
+    required: true
+  repetition-count:
+    description: Paired repetitions
+    required: false
+    default: "1"
+outputs:
+  ci-run-id:
+    description: Opaque Varytra CI run UUID
+    value: ${{ steps.start.outputs.ci-run-id }}
+  batch-id:
+    description: Opaque Varytra batch UUID
+    value: ${{ steps.start.outputs.batch-id }}
+runs:
+  using: composite
+  steps:
+    - id: start
+      shell: bash
+      env:
+        VARYTRA_API_KEY: ${{ inputs.api-key }}
+        VARYTRA_API_URL: ${{ inputs.api-url }}
+        VARYTRA_PROJECT_ID: ${{ inputs.project-id }}
+        VARYTRA_BASELINE_ID: ${{ inputs.baseline-agent-version-id }}
+        VARYTRA_CANDIDATE_ID: ${{ inputs.candidate-agent-version-id }}
+        VARYTRA_SCENARIO_IDS: ${{ inputs.scenario-version-ids }}
+        VARYTRA_IDEMPOTENCY_KEY: ${{ inputs.idempotency-key }}
+        VARYTRA_REPETITIONS: ${{ inputs.repetition-count }}
+      run: |
+        response="$(node -e 'const scenarios=process.env.VARYTRA_SCENARIO_IDS.split(","); process.stdout.write(JSON.stringify({baseline_agent_version_id:process.env.VARYTRA_BASELINE_ID,candidate_agent_version_id:process.env.VARYTRA_CANDIDATE_ID,scenario_version_ids:scenarios,repetition_count:Number(process.env.VARYTRA_REPETITIONS),idempotency_key:process.env.VARYTRA_IDEMPOTENCY_KEY}))' | curl --fail --silent --show-error --request POST "$VARYTRA_API_URL/v1/projects/$VARYTRA_PROJECT_ID/ci-runs" --header "Authorization: Bearer $VARYTRA_API_KEY" --header "Content-Type: application/json" --data-binary @-)"
+        ci_run_id="$(node -e 'const value=JSON.parse(process.argv[1]); process.stdout.write(value.ci_run.id)' "$response")"
+        batch_id="$(node -e 'const value=JSON.parse(process.argv[1]); process.stdout.write(value.ci_run.batch_id)' "$response")"
+        printf 'ci-run-id=%s\n' "$ci_run_id" >> "$GITHUB_OUTPUT"
+        printf 'batch-id=%s\n' "$batch_id" >> "$GITHUB_OUTPUT"
+        printf 'Varytra comparison queued: `%s`\n' "$ci_run_id" >> "$GITHUB_STEP_SUMMARY"
