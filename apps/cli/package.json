@@ -1,0 +1,8 @@
+{
+  "name": "@varytra/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "varytra": "src/main.ts" },
+  "scripts": { "typecheck": "tsc --noEmit" }
+}
