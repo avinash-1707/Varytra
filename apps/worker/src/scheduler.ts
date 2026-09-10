@@ -13,8 +13,10 @@ export interface SchedulerWorker {
 }
 
 export interface CompletedExecution {
+  readonly finalState: Readonly<Record<string, unknown>>;
   readonly metrics: SafeRunMetrics;
   readonly normalizedTrace: Uint8Array;
+  readonly policyFailures: readonly string[];
   readonly rawTrace: Uint8Array;
   readonly redactedTrace: Uint8Array;
 }
@@ -35,6 +37,8 @@ export const executeReferenceRun: RunExecutor = async ({ side }) => {
     rawTrace: serializeLines(execution.rawTrace),
     redactedTrace: serializeLines(trace),
     normalizedTrace: serializeLines(normalized),
+    finalState: { ...execution.finalState },
+    policyFailures: execution.policyFailures,
     metrics: {
       eventCount: trace.length,
       toolCallCount: trace.filter((event) => event.eventType === 'tool_call').length,
@@ -68,7 +72,7 @@ async function persistExecution(
     { kind: 'raw-trace', storageRef: raw.key, contentHash: raw.contentHash, schemaVersion: '1.0', classification: 'restricted' },
     { kind: 'redacted-trace', storageRef: redacted.key, contentHash: redacted.contentHash, schemaVersion: '1.0', classification: 'sensitive' },
     { kind: 'normalized-trace', storageRef: normalized.key, contentHash: normalized.contentHash, schemaVersion: '1.0', classification: 'internal' },
-  ], execution.metrics);
+  ], execution.metrics, { finalState: execution.finalState, policyFailures: execution.policyFailures });
 }
 
 export async function executeClaimedRun(

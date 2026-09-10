@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import { withOrganizationTransaction } from './index.js';
 
 export type TerminalRunStatus = 'succeeded' | 'agent_failed' | 'infrastructure_failed' | 'timed_out';
@@ -19,6 +19,86 @@ export interface SafeRunMetrics {
   readonly eventCount: number;
   readonly tokenUsage: number;
   readonly toolCallCount: number;
+}
+
+export interface RunOutcome {
+  readonly finalState: Readonly<Record<string, unknown>>;
+  readonly metrics: SafeRunMetrics;
+  readonly policyFailures: readonly string[];
+  readonly repetition: number;
+  readonly side: 'baseline' | 'candidate';
+}
+
+export interface ComparisonReport {
+  readonly classification: 'inconclusive' | 'no-material-change' | 'suspected-regression';
+  readonly confidence: 'high' | 'low';
+  readonly findings: readonly Readonly<{ category: 'final_state' | 'policy'; severity: 'critical' }> [];
+  readonly gateStatus: 'block' | 'pass' | 'review';
+  readonly severity: 'critical' | 'none' | 'unknown';
+  readonly summary: string;
+}
+
+function statesMatch(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (typeof left !== 'object' || left === null || typeof right !== 'object' || right === null || Array.isArray(left) || Array.isArray(right)) return false;
+  const leftRecord = left as Readonly<Record<string, unknown>>;
+  const rightRecord = right as Readonly<Record<string, unknown>>;
+  const leftKeys = Object.keys(leftRecord).sort();
+  const rightKeys = Object.keys(rightRecord).sort();
+  return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index] && statesMatch(leftRecord[key], rightRecord[key]));
+}
+
+export function deriveComparisonReport(input: Readonly<{ expectedFinalState: Readonly<Record<string, unknown>>; outcomes: readonly RunOutcome[] }>): ComparisonReport {
+  const repetitions = new Set(input.outcomes.map((outcome) => outcome.repetition));
+  const completePairs = Array.from(repetitions).every((repetition) => input.outcomes.some((outcome) => outcome.repetition === repetition && outcome.side === 'baseline') && input.outcomes.some((outcome) => outcome.repetition === repetition && outcome.side === 'candidate'));
+  if (input.outcomes.length === 0 || !completePairs) return { classification: 'inconclusive', severity: 'unknown', confidence: 'low', gateStatus: 'review', summary: 'Comparison evidence is incomplete.', findings: [] };
+  const candidates = input.outcomes.filter((outcome) => outcome.side === 'candidate');
+  const findings = candidates.flatMap((outcome) => [
+    ...(statesMatch(outcome.finalState, input.expectedFinalState) ? [] : [{ category: 'final_state' as const, severity: 'critical' as const }]),
+    ...outcome.policyFailures.map(() => ({ category: 'policy' as const, severity: 'critical' as const })),
+  ]);
+  if (findings.length > 0) return { classification: 'suspected-regression', severity: 'critical', confidence: 'high', gateStatus: 'block', summary: 'Candidate violated a final-state assertion or policy.', findings };
+  return { classification: 'no-material-change', severity: 'none', confidence: 'high', gateStatus: 'pass', summary: 'No material difference across completed paired runs.', findings: [] };
+}
+
+function record(value: unknown): Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Readonly<Record<string, unknown>> : {};
+}
+
+function strings(value: unknown): readonly string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string') ? value : [];
+}
+
+async function finalizeBatchReports(client: PoolClient, organizationId: string, batchId: string): Promise<void> {
+  const batch = await client.query<Readonly<{ status: string }>>('SELECT status FROM comparison_batches WHERE id = $1', [batchId]);
+  if (batch.rows[0]?.status !== 'completed') return;
+  const outcomes = await client.query<Readonly<{ scenarioVersionId: string; projectId: string; side: 'baseline' | 'candidate'; repetition: number; hasOutcome: boolean; finalState: unknown; policyFailures: unknown; assertionSpec: unknown; costUsd: number; durationMs: number; eventCount: number; tokenUsage: number; toolCallCount: number }>>(
+    `SELECT run.scenario_version_id AS "scenarioVersionId", run.project_id AS "projectId", run.side, run.repetition,
+            outcome.run_id IS NOT NULL AS "hasOutcome", outcome.final_state AS "finalState", outcome.policy_failures AS "policyFailures", scenario.assertion_spec AS "assertionSpec",
+            COALESCE(run.cost_usd, 0)::float8 AS "costUsd", COALESCE(run.duration_ms, 0) AS "durationMs", COALESCE(run.event_count, 0) AS "eventCount", COALESCE(run.token_usage, 0) AS "tokenUsage", COALESCE(run.tool_call_count, 0) AS "toolCallCount"
+     FROM agent_runs run LEFT JOIN agent_run_outcomes outcome ON outcome.run_id = run.id
+     JOIN scenario_versions scenario ON scenario.id = run.scenario_version_id
+     WHERE run.batch_id = $1`, [batchId],
+  );
+  const byScenario = new Map<string, typeof outcomes.rows>();
+  for (const outcome of outcomes.rows) byScenario.set(outcome.scenarioVersionId, [...(byScenario.get(outcome.scenarioVersionId) ?? []), outcome]);
+  for (const [scenarioVersionId, rows] of byScenario) {
+    const first = rows[0];
+    if (first === undefined) continue;
+    const expectedFinalState = record(record(first.assertionSpec).expected_state);
+    const report = deriveComparisonReport({ expectedFinalState, outcomes: rows.filter((outcome) => outcome.hasOutcome).map((outcome) => ({ side: outcome.side, repetition: outcome.repetition, finalState: record(outcome.finalState), policyFailures: strings(outcome.policyFailures), metrics: { costUsd: outcome.costUsd, durationMs: outcome.durationMs, eventCount: outcome.eventCount, tokenUsage: outcome.tokenUsage, toolCallCount: outcome.toolCallCount } })) });
+    const inserted = await client.query<Readonly<{ id: string }>>(
+      `INSERT INTO comparisons (organization_id, project_id, batch_id, scenario_version_id, classification, severity, confidence, gate_status, summary_redacted, coverage, state_comparison, evaluator_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'report-finalizer-v1')
+       ON CONFLICT (batch_id, scenario_version_id) DO NOTHING RETURNING id`,
+      [organizationId, first.projectId, batchId, scenarioVersionId, report.classification, report.severity, report.confidence, report.gateStatus, report.summary, { expected_pairs: new Set(rows.map((row) => row.repetition)).size, complete_pairs: rows.length / 2, analyzable_pairs: report.classification === 'inconclusive' ? 0 : rows.length / 2 }, { status: 'derived', expected_summary: 'Stored in scenario version', baseline_summary: 'Redacted', candidate_summary: 'Redacted', changes: [] }],
+    );
+    const comparisonId = inserted.rows[0]?.id;
+    if (comparisonId === undefined) continue;
+    for (const finding of report.findings) {
+      await client.query('INSERT INTO comparison_findings (organization_id, project_id, comparison_id, category, severity, summary_redacted) VALUES ($1, $2, $3, $4, $5, $6)', [organizationId, first.projectId, comparisonId, finding.category, finding.severity, finding.category === 'policy' ? 'Candidate policy requirement failed.' : 'Candidate final state did not match the scenario assertion.']);
+    }
+  }
 }
 
 export class SchedulingError extends Error {
@@ -212,7 +292,7 @@ export async function setRunProgress(pool: Pool, organizationId: string, runId: 
   });
 }
 
-export async function completeRunWithArtifacts(pool: Pool, organizationId: string, runId: string, leaseToken: string, artifacts: readonly RunArtifactLineage[], metrics: SafeRunMetrics): Promise<boolean> {
+export async function completeRunWithArtifacts(pool: Pool, organizationId: string, runId: string, leaseToken: string, artifacts: readonly RunArtifactLineage[], metrics: SafeRunMetrics, outcome: Readonly<{ finalState: Readonly<Record<string, unknown>>; policyFailures: readonly string[] }>): Promise<boolean> {
   if (artifacts.length !== 3 || new Set(artifacts.map((artifact) => artifact.kind)).size !== 3) throw new SchedulingError('invalid_request');
   return withOrganizationTransaction(pool, organizationId, async (client) => {
     const run = await client.query<Readonly<{ batchId: string; projectId: string }>>('SELECT batch_id AS "batchId", project_id AS "projectId" FROM agent_runs WHERE id = $1 AND lease_token = $2 AND status = \'running\' FOR UPDATE', [runId, leaseToken]);
@@ -226,11 +306,17 @@ export async function completeRunWithArtifacts(pool: Pool, organizationId: strin
       );
     }
     await client.query(
+      `INSERT INTO agent_run_outcomes (run_id, organization_id, project_id, final_state, policy_failures)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [runId, organizationId, row.projectId, JSON.stringify(outcome.finalState), JSON.stringify(outcome.policyFailures)],
+    );
+    await client.query(
       `UPDATE agent_runs SET status = 'succeeded', progress_stage = 'complete', event_count = $3, tool_call_count = $4, duration_ms = $5, token_usage = $6, cost_usd = $7, lease_token = NULL, lease_expires_at = NULL, finished_at = now(), updated_at = now() WHERE id = $1 AND lease_token = $2`,
       [runId, leaseToken, metrics.eventCount, metrics.toolCallCount, metrics.durationMs, metrics.tokenUsage, metrics.costUsd],
     );
     await client.query("INSERT INTO comparison_batch_progress (organization_id, project_id, batch_id, run_id, stage) VALUES ($1, $2, $3, $4, 'complete')", [organizationId, row.projectId, row.batchId, runId]);
     await client.query(`UPDATE comparison_batches SET status = 'completed', progress_stage = CASE WHEN EXISTS (SELECT 1 FROM agent_runs WHERE batch_id = $1 AND status <> 'succeeded') THEN 'failed' ELSE 'complete' END, completed_at = now() WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM agent_runs WHERE batch_id = $1 AND status NOT IN ('succeeded', 'agent_failed', 'infrastructure_failed', 'timed_out'))`, [row.batchId]);
+    await finalizeBatchReports(client, organizationId, row.batchId);
     return true;
   });
 }
