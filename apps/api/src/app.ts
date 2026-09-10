@@ -124,6 +124,14 @@ export function buildApp(options: BuildAppOptions = {}) {
       if (value.action === 'override_classification' && value.override_classification === undefined) context.addIssue({ code: 'custom', message: 'override classification is required', path: ['override_classification'] });
       if (value.action !== 'override_classification' && value.override_classification !== undefined) context.addIssue({ code: 'custom', message: 'override classification is only allowed for override decisions', path: ['override_classification'] });
     });
+    const regressionScenarioSchema = z.object({
+      stable_key: z.string().regex(/^[a-z][a-z0-9_-]{0,99}$/),
+      task_spec: z.object({ input: z.string().min(1).max(20_000), success_definition: z.string().min(1).max(10_000) }),
+      fixture_ref: z.string().min(1).max(500),
+      assertion_spec: z.object({ expected_state: z.record(z.string(), z.unknown()), assertions: z.array(z.string().min(1)).min(1).max(100) }),
+      efficiency_budget: z.object({ max_tool_calls: z.number().int().positive().max(10_000), max_cost_usd: z.number().positive().max(100_000) }),
+      policy_version_id: z.uuid().optional(),
+    });
 
     function contentHash(value: unknown): string {
       return createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -645,6 +653,70 @@ export function buildApp(options: BuildAppOptions = {}) {
           return created;
         });
         return reply.status(201).send({ review_decision: { id: decision.id, action: body.data.action, override_classification: body.data.override_classification ?? null, gate_status: resultingGateStatus, created_at: decision.createdAt } });
+      } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
+    });
+
+    app.get('/v1/onboarding/templates', async (request, reply) => {
+      try {
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'projects:read');
+        return { templates: [
+          { id: 'support-workflow', name: 'Support workflow safety', adapter_type: 'reference', description: 'Resettable ticket resolution with approval and refund safeguards.' },
+          { id: 'structured-output', name: 'Structured output', adapter_type: 'registered-http', description: 'Validate an immutable response contract before release.' },
+          { id: 'retries-and-cost', name: 'Retries and cost', adapter_type: 'registered-http', description: 'Bound retries, latency, tool calls, and execution cost.' },
+        ] };
+      } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
+    });
+
+    app.post('/v1/comparisons/:comparisonId/regression-scenario', async (request, reply) => {
+      try {
+        const comparisonId = (request.params as { readonly comparisonId?: string }).comparisonId;
+        const body = regressionScenarioSchema.safeParse(request.body);
+        if (!isUuid(comparisonId) || !body.success) return reply.status(400).send({ error: 'invalid_request' });
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'versions:create');
+        const scenarioVersion = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => {
+          const comparison = await client.query<Readonly<{ projectId: string }>>('SELECT project_id AS "projectId" FROM comparisons WHERE id = $1 AND classification = \'suspected-regression\'', [comparisonId]);
+          const report = comparison.rows[0];
+          if (report === undefined) throw new AuthorizationError('not_found');
+          if (body.data.policy_version_id !== undefined && (await client.query('SELECT 1 FROM policy_versions WHERE id = $1 AND project_id = $2', [body.data.policy_version_id, report.projectId])).rowCount !== 1) throw new AuthorizationError('not_found');
+          const scenario = await client.query<Readonly<{ id: string }>>('INSERT INTO scenarios (organization_id, project_id, stable_key) VALUES ($1, $2, $3) RETURNING id', [membership.organizationId, report.projectId, body.data.stable_key]);
+          const scenarioId = scenario.rows[0]?.id;
+          if (scenarioId === undefined) throw new Error('Regression scenario insert did not return an ID');
+          const hash = contentHash(body.data);
+          const created = await client.query<Readonly<{ id: string; version: number }>>('INSERT INTO scenario_versions (organization_id, project_id, scenario_id, version, task_spec, fixture_ref, assertion_spec, efficiency_budget, policy_version_id, content_hash, created_by_user_id) VALUES ($1, $2, $3, 1, $4, $5, $6, $7, $8, $9, $10) RETURNING id, version', [membership.organizationId, report.projectId, scenarioId, body.data.task_spec, body.data.fixture_ref, body.data.assertion_spec, body.data.efficiency_budget, body.data.policy_version_id ?? null, hash, membership.userId]);
+          const version = created.rows[0];
+          if (version === undefined) throw new Error('Regression scenario version insert did not return an ID');
+          await writeAuditEvent(client, { organizationId: membership.organizationId, actorType: 'user', actorId: membership.userId, action: 'comparison.regression_scenario_created', targetType: 'scenario_version', targetId: version.id, metadata: { comparison_id: comparisonId } });
+          return version;
+        });
+        return reply.status(201).send({ scenario_version: scenarioVersion });
+      } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
+    });
+
+    app.get('/v1/review-inbox', async (request, reply) => {
+      try {
+        const membership = await authenticatedMembership(request);
+        authorize(membership, 'reports:read');
+        const comparisons = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => (await client.query<Readonly<{ id: string; projectId: string; classification: string; severity: string; summary: string }>>(
+          `SELECT comparison.id, comparison.project_id AS "projectId", comparison.classification, comparison.severity, comparison.summary_redacted AS summary
+           FROM comparisons comparison WHERE comparison.gate_status IN ('block', 'review')
+           AND NOT EXISTS (SELECT 1 FROM review_decisions decision WHERE decision.comparison_id = comparison.id)
+           ORDER BY comparison.created_at DESC, comparison.id DESC LIMIT 100`,
+        )).rows);
+        return { comparisons };
+      } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
+    });
+
+    app.get('/v1/projects/:projectId/trends', async (request, reply) => {
+      try {
+        const { membership, projectId } = await projectMembership(request, 'projects:read');
+        const trends = await withOrganizationTransaction(options.database!, membership.organizationId, async (client) => (await client.query<Readonly<{ completedReports: number; regressions: number; reviewedReports: number }>>(
+          `SELECT count(*)::integer AS "completedReports", count(*) FILTER (WHERE classification = 'suspected-regression')::integer AS regressions,
+             count(*) FILTER (WHERE EXISTS (SELECT 1 FROM review_decisions decision WHERE decision.comparison_id = comparisons.id))::integer AS "reviewedReports"
+           FROM comparisons WHERE project_id = $1`, [projectId],
+        )).rows[0]);
+        return { trends: trends ?? { completedReports: 0, regressions: 0, reviewedReports: 0 } };
       } catch (error) { if (error instanceof AuthorizationError) return authorizationReply(error, reply); throw error; }
     });
 
