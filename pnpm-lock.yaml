@@ -97,6 +97,8 @@ importers:
         specifier: ^8.23.1
         version: 8.23.1
 
+  apps/cli: {}
+
   apps/web:
     dependencies:
       react:

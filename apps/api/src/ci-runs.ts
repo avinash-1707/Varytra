@@ -18,6 +18,13 @@ export interface CiRun {
   readonly id: string;
 }
 
+export function toCiGateStatus(batchStatus: string, reportGateStatus: string | null): CiGateStatus {
+  if (reportGateStatus === 'pass') return 'pass';
+  if (reportGateStatus === 'block') return 'fail';
+  if (reportGateStatus === 'warn' || reportGateStatus === 'review') return 'warn';
+  return batchStatus === 'completed' ? 'warn' : 'pending';
+}
+
 export async function createCiRun(pool: Pool, principal: CiPrincipal, input: CreateCiRunInput): Promise<CiRun> {
   const batch = await createComparisonBatch(pool, {
     organizationId: principal.organizationId,
@@ -65,17 +72,24 @@ export async function readCiRun(pool: Pool, principal: CiPrincipal, ciRunId: str
     }>>(
       `SELECT ci.id, ci.batch_id AS "batchId", batch.status,
               report.id AS "reportId", report.classification, report.severity, report.confidence,
-              report.gate_status AS "reportGateStatus"
+              COALESCE(decision.resulting_gate_status, report.gate_status) AS "reportGateStatus"
        FROM ci_runs ci
        JOIN comparison_batches batch ON batch.id = ci.batch_id
        LEFT JOIN comparisons report ON report.batch_id = batch.id
+       LEFT JOIN LATERAL (
+         SELECT resulting_gate_status FROM review_decisions
+         WHERE comparison_id = report.id
+         ORDER BY created_at DESC, id DESC LIMIT 1
+       ) decision ON true
        WHERE ci.id = $1 AND ci.project_id = $2
-       ORDER BY report.created_at ASC LIMIT 1`,
+       ORDER BY CASE COALESCE(decision.resulting_gate_status, report.gate_status)
+         WHEN 'block' THEN 1 WHEN 'review' THEN 2 WHEN 'warn' THEN 3 WHEN 'pass' THEN 4 ELSE 5 END,
+         report.created_at ASC NULLS LAST LIMIT 1`,
       [ciRunId, principal.projectId],
     );
     const row = result.rows[0];
     if (row === undefined) throw new Error('CI run not found');
-    const gateStatus: CiGateStatus = row.reportGateStatus === 'pass' ? 'pass' : row.reportGateStatus === 'block' ? 'fail' : row.reportGateStatus === 'warn' || row.reportGateStatus === 'review' ? 'warn' : row.status === 'completed' ? 'warn' : 'pending';
+    const gateStatus = toCiGateStatus(row.status, row.reportGateStatus);
     return { id: row.id, batchId: row.batchId, reportId: row.reportId, classification: row.classification, severity: row.severity, confidence: row.confidence, gateStatus };
   });
 }
