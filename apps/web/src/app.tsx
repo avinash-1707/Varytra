@@ -1,4 +1,5 @@
 import { type FormEvent, useEffect, useMemo, useState } from 'react';
+import { FirstRunOnboarding } from './onboarding';
 import { readComparisonIdFromSearch, ReportScreen } from './report';
 
 const ORGANIZATION_STORAGE_KEY = 'x-varytra-organization';
@@ -1037,6 +1038,8 @@ function Workspace() {
         <ProjectListStateView state={projectState} />
       </section>
 
+      {projectState.status === 'empty' && <FirstRunOnboarding />}
+
       <section className="version-pane" aria-labelledby="version-selection-title">
         <div className="version-pane-heading">
           <div>
@@ -1086,7 +1089,7 @@ function Workspace() {
         <BatchProgressStateView state={batchProgressState} onRetry={() => setBatchProgressRetryKey((current) => current + 1)} />
       </section>
 
-      <section className="create-pane" aria-labelledby="create-project-title">
+      <section id="create-project" className="create-pane" aria-labelledby="create-project-title">
         <div className="create-pane-heading">
           <p className="eyebrow">New record</p>
           <h2 id="create-project-title">Create project</h2>
