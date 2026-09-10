@@ -6,6 +6,7 @@ import type { Pool } from 'pg';
 import { withOrganizationTransaction } from '@varytra/infrastructure';
 import { createComparisonBatch, markDispatchPublished, readyDispatches, SchedulingError } from '@varytra/infrastructure/scheduling';
 import { z } from 'zod';
+import { createCiRun, readCiRun } from './ci-runs.js';
 import {
   authenticateCiPrincipal,
   changeMembership,
@@ -21,6 +22,11 @@ import {
   type Capability,
   type Membership,
 } from './authorization.js';
+
+function ciAuthorizationReply(error: AuthorizationError, reply: { status: (code: number) => { send: (body: unknown) => unknown } }): unknown {
+  const status = error.code === 'invalid_credentials' ? 401 : error.code === 'invalid_request' ? 400 : error.code === 'forbidden' ? 403 : 404;
+  return reply.status(status).send({ error: error.code });
+}
 
 export interface AuthHandler {
   readonly handler: (request: Request) => Promise<Response>;
@@ -739,6 +745,59 @@ export function buildApp(options: BuildAppOptions = {}) {
   }
 
   if (options.database !== undefined) {
+    const ciRunSchema = z.object({
+      baseline_agent_version_id: z.uuid(),
+      candidate_agent_version_id: z.uuid(),
+      scenario_version_ids: z.array(z.uuid()).min(1).max(100),
+      repetition_count: z.number().int().min(1).max(20),
+      idempotency_key: z.string().trim().min(1).max(128),
+    });
+
+    app.post('/v1/projects/:projectId/ci-runs', async (request, reply) => {
+      const projectId = (request.params as { readonly projectId?: string }).projectId;
+      const parsed = ciRunSchema.safeParse(request.body);
+      const token = request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice('Bearer '.length) : undefined;
+      if (!z.uuid().safeParse(projectId).success || !parsed.success || token === undefined || token.length === 0) return reply.status(400).send({ error: 'invalid_request' });
+      try {
+        const principal = await authenticateCiPrincipal(options.database!, token!, 'ci:write');
+        if (principal.projectId !== projectId) return reply.status(404).send({ error: 'not_found' });
+        const ciRun = await createCiRun(options.database!, principal, {
+          baselineAgentVersionId: parsed.data.baseline_agent_version_id,
+          candidateAgentVersionId: parsed.data.candidate_agent_version_id,
+          scenarioVersionIds: parsed.data.scenario_version_ids,
+          repetitionCount: parsed.data.repetition_count,
+          idempotencyKey: parsed.data.idempotency_key,
+        });
+        if (options.dispatchPublisher !== undefined) {
+          const dispatches = await readyDispatches(options.database!, principal.organizationId, ciRun.batch.id);
+          for (const dispatch of dispatches) {
+            await options.dispatchPublisher.publish(dispatch);
+            await markDispatchPublished(options.database!, principal.organizationId, dispatch.dispatchId);
+          }
+        }
+        return reply.status(201).send({ ci_run: { id: ciRun.id, batch_id: ciRun.batch.id, status: 'pending' } });
+      } catch (error) {
+        if (error instanceof AuthorizationError) return ciAuthorizationReply(error, reply);
+        if (error instanceof SchedulingError) return reply.status(error.code === 'idempotency_key_reused' ? 409 : error.code === 'not_found' ? 404 : 400).send({ error: error.code });
+        throw error;
+      }
+    });
+
+    app.get('/v1/ci-runs/:ciRunId', async (request, reply) => {
+      const ciRunId = (request.params as { readonly ciRunId?: string }).ciRunId;
+      const token = request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice('Bearer '.length) : undefined;
+      if (!z.uuid().safeParse(ciRunId).success || token === undefined || token.length === 0) return reply.status(400).send({ error: 'invalid_request' });
+      try {
+        const principal = await authenticateCiPrincipal(options.database!, token!, 'ci:read');
+        const ciRun = await readCiRun(options.database!, principal, ciRunId!);
+        return { ci_run: { id: ciRun.id, batch_id: ciRun.batchId, status: ciRun.gateStatus, classification: ciRun.classification, severity: ciRun.severity, confidence: ciRun.confidence, report_url: ciRun.reportId === null ? null : `/report?comparisonId=${ciRun.reportId}` } };
+      } catch (error) {
+        if (error instanceof AuthorizationError) return ciAuthorizationReply(error, reply);
+        if (error instanceof Error && error.message === 'CI run not found') return reply.status(404).send({ error: 'not_found' });
+        throw error;
+      }
+    });
+
     app.route({
       method: ['GET', 'POST'],
       url: '/v1/ci/authorization',
