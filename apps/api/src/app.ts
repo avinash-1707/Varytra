@@ -601,8 +601,9 @@ export function buildApp(options: BuildAppOptions = {}) {
           ]);
           const projection = safeReportProjection(comparison);
           const latestDecision = decisions.rows[0];
+          const latestOverride = decisions.rows.find((decision) => decision.overrideClassification !== null);
           return {
-            classification: latestDecision?.overrideClassification ?? comparison.classification,
+            classification: latestOverride?.overrideClassification ?? comparison.classification,
             severity: comparison.severity,
             confidence: comparison.confidence,
             gate_status: latestDecision?.gateStatus ?? comparison.gateStatus,

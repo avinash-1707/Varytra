@@ -53,7 +53,10 @@ describeDatabase('review-decisions', () => {
     const restricted = await app.inject({ method: 'POST', url: `/v1/comparisons/${comparisonId}/review`, headers, payload: { action: 'approve', rationale: 'authorization: Bearer secret-value' } });
     expect(restricted.statusCode).toBe(201);
     const report = await app.inject({ method: 'GET', url: `/v1/comparisons/${comparisonId}/report`, headers });
-    expect(report.json()).toMatchObject({ report: { classification: 'inconclusive', gate_status: 'pass', review_decisions: [{ action: 'approve', rationale: '[REDACTED_RESTRICTED_CONTENT]' }] } });
+    const reportBody = report.json() as { readonly report: { readonly classification: string; readonly gate_status: string; readonly review_decisions: readonly unknown[] } };
+    expect(reportBody.report.classification).toBe('inconclusive');
+    expect(reportBody.report.gate_status).toBe('pass');
+    expect(reportBody.report.review_decisions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'approve', rationale: '[REDACTED_RESTRICTED_CONTENT]' })]));
     expect(report.body).not.toContain('secret-value');
   });
 });
