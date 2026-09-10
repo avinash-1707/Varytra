@@ -6,6 +6,23 @@ export const healthResponseSchema = z.object({
 
 export type HealthResponse = z.infer<typeof healthResponseSchema>;
 
+export const judgeClassificationSchema = z.enum(['no-material-change', 'suspected-regression', 'inconclusive']);
+
+export const judgeResponseSchema = z.object({
+  classification: judgeClassificationSchema,
+  severity: z.enum(['medium', 'high']),
+  confidence: z.number().finite().min(0).max(1),
+  evidenceIds: z.array(z.string().regex(/^(baseline|candidate):[1-9][0-9]*$/)).max(16),
+  rationale: z.string().min(1).max(2_000),
+  usage: z.object({
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+    costUsd: z.number().finite().nonnegative(),
+  }).strict(),
+}).strict();
+
+export type JudgeResponse = z.infer<typeof judgeResponseSchema>;
+
 export const runDispatchSchema = z.object({
   organizationId: z.uuid(),
   runId: z.uuid(),
