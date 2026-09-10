@@ -1,4 +1,7 @@
+import { createHash } from 'node:crypto';
 import type { AlignmentResult, DivergenceSegment } from '@varytra/alignment';
+import { judgeResponseSchema, type JudgeResponse } from '@varytra/schemas';
+import { judgePromptVersion, localizedJudgeInstructions } from './judge-prompt.js';
 
 export interface EfficiencyBudget {
   readonly maxCostUsd: number;
@@ -137,4 +140,175 @@ export function aggregateVerdict(expectedPairs: number, pairs: readonly PairAsse
     ? { classification: 'improvement', severity: 'none', confidence: 'high' }
     : { classification: 'no-material-change', severity: 'none', confidence: 'high' };
   return { classification: verdict.classification, coverage, findings, firstMaterialDivergence: null, verdict };
+}
+
+const judgeConfidenceThreshold = 0.75;
+const judgeContextEventLimit = 8;
+const judgeTextLimit = 1_000;
+const judgePolicyLimit = 10;
+const judgePolicyTextLimit = 300;
+const judgeEventTextLimit = 1_000;
+const secretPattern = /(?:bearer\s+|api[-_]?key\s*[=:]|password\s*[=:]|(?:access[-_]?|id[-_]?)?token\s*[=:]|sk-[a-z0-9_-]{8,}|(?:gh[pousr]_|github_pat_)[a-z0-9_]{8,}|akia[0-9a-z]{16}|eyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+|-----begin [a-z ]*private key-----)/i;
+
+export interface JudgeContextEvent {
+  readonly evidenceId: string;
+  readonly eventType: string;
+  readonly actor: string;
+  readonly toolName: string | null;
+  readonly argumentsRedacted: string | null;
+  readonly resultSummaryRedacted: string | null;
+  readonly errorClass: string | null;
+  readonly stateBeforeRef: string | null;
+  readonly stateAfterRef: string | null;
+}
+
+export interface JudgeContextPacket {
+  readonly availableEvidenceIds: readonly string[];
+  readonly baselineEvents: readonly JudgeContextEvent[];
+  readonly candidateEvents: readonly JudgeContextEvent[];
+  readonly deterministicFindings: readonly Readonly<{ category: FindingProjection['category']; severity: FindingProjection['severity'] }> [];
+  readonly finalStateSummary: string | null;
+  readonly instructions: string;
+  readonly policyRequirements: readonly string[];
+  readonly promptVersion: typeof judgePromptVersion;
+  readonly taskIntent: string;
+}
+
+export interface BuildJudgeContextInput {
+  readonly deterministicFindings: readonly Readonly<{ category: FindingProjection['category']; severity: FindingProjection['severity'] }> [];
+  readonly divergence: DivergenceSegment | null;
+  readonly finalStateSummary?: string;
+  readonly policyRequirements: readonly string[];
+  readonly taskIntent: string;
+}
+
+function redactJudgeText(value: string | null): string | null {
+  if (value === null) return null;
+  return secretPattern.test(value) ? '[REDACTED_SECRET]' : value;
+}
+
+function boundedJudgeText(value: string, limit: number): string {
+  return (redactJudgeText(value) ?? '').slice(0, limit);
+}
+
+function projectJudgeEvent(side: 'baseline' | 'candidate', event: DivergenceSegment['baselineContext'][number]): JudgeContextEvent {
+  return {
+    evidenceId: `${side}:${event.sequenceNo}`,
+    eventType: event.eventType,
+    actor: boundedJudgeText(event.actor, 128),
+    toolName: event.toolName === null ? null : boundedJudgeText(event.toolName, 128),
+    argumentsRedacted: event.argumentsRedacted === null ? null : boundedJudgeText(event.argumentsRedacted, judgeEventTextLimit),
+    resultSummaryRedacted: event.resultSummaryRedacted === null ? null : boundedJudgeText(event.resultSummaryRedacted, judgeEventTextLimit),
+    errorClass: event.errorClass === null ? null : boundedJudgeText(event.errorClass, 128),
+    stateBeforeRef: event.stateBeforeRef === null ? null : boundedJudgeText(event.stateBeforeRef, 128),
+    stateAfterRef: event.stateAfterRef === null ? null : boundedJudgeText(event.stateAfterRef, 128),
+  };
+}
+
+export function buildJudgeContext(input: BuildJudgeContextInput): JudgeContextPacket {
+  const baselineEvents = (input.divergence?.baselineContext ?? []).slice(0, judgeContextEventLimit).map((event) => projectJudgeEvent('baseline', event));
+  const candidateEvents = (input.divergence?.candidateContext ?? []).slice(0, judgeContextEventLimit).map((event) => projectJudgeEvent('candidate', event));
+  return {
+    instructions: localizedJudgeInstructions,
+    promptVersion: judgePromptVersion,
+    taskIntent: boundedJudgeText(input.taskIntent, judgeTextLimit),
+    policyRequirements: input.policyRequirements.slice(0, judgePolicyLimit).map((requirement) => boundedJudgeText(requirement, judgePolicyTextLimit)),
+    deterministicFindings: input.deterministicFindings,
+    finalStateSummary: input.finalStateSummary === undefined ? null : boundedJudgeText(input.finalStateSummary, judgeTextLimit),
+    baselineEvents,
+    candidateEvents,
+    availableEvidenceIds: [...baselineEvents, ...candidateEvents].map((event) => event.evidenceId),
+  };
+}
+
+export interface JudgeClient {
+  readonly model: string;
+  readonly evaluate: (context: JudgeContextPacket) => Promise<unknown>;
+}
+
+export interface JudgeAttribution {
+  readonly cached: boolean;
+  readonly costUsd: number;
+  readonly inputTokens: number;
+  readonly latencyMs: number;
+  readonly outputTokens: number;
+}
+
+export type SemanticJudgeResult =
+  | { readonly status: 'complete'; readonly cacheKey: string; readonly response: JudgeResponse; readonly attribution: JudgeAttribution }
+  | { readonly status: 'inconclusive'; readonly cacheKey: string; readonly reason: 'low_confidence' | 'malformed' | 'unavailable' };
+
+export interface JudgeResultCache {
+  readonly get: (cacheKey: string) => JudgeResponse | undefined;
+  readonly set: (cacheKey: string, response: JudgeResponse) => void;
+}
+
+export class InMemoryJudgeResultCache implements JudgeResultCache {
+  readonly #entries = new Map<string, JudgeResponse>();
+
+  get(cacheKey: string): JudgeResponse | undefined {
+    return this.#entries.get(cacheKey);
+  }
+
+  set(cacheKey: string, response: JudgeResponse): void {
+    this.#entries.set(cacheKey, response);
+  }
+}
+
+function cacheKey(client: JudgeClient, context: JudgeContextPacket): string {
+  return createHash('sha256').update(JSON.stringify({ model: client.model, context })).digest('hex');
+}
+
+function completeJudgeResult(cacheKeyValue: string, response: JudgeResponse, attribution: JudgeAttribution): SemanticJudgeResult {
+  return { status: 'complete', cacheKey: cacheKeyValue, response: { ...response, rationale: redactJudgeText(response.rationale) ?? '[REDACTED_SECRET]' }, attribution };
+}
+
+export async function evaluateLocalizedSemanticJudge(client: JudgeClient, input: BuildJudgeContextInput, cache?: JudgeResultCache): Promise<SemanticJudgeResult> {
+  const context = buildJudgeContext(input);
+  const cacheKeyValue = cacheKey(client, context);
+  const cached = cache?.get(cacheKeyValue);
+  if (cached !== undefined) return completeJudgeResult(cacheKeyValue, cached, { cached: true, inputTokens: 0, outputTokens: 0, costUsd: 0, latencyMs: 0 });
+
+  const startedAt = performance.now();
+  let providerResponse: unknown;
+  try {
+    providerResponse = await client.evaluate(context);
+  } catch {
+    return { status: 'inconclusive', cacheKey: cacheKeyValue, reason: 'unavailable' };
+  }
+  const parsed = judgeResponseSchema.safeParse(providerResponse);
+  if (!parsed.success || !parsed.data.evidenceIds.every((evidenceId) => context.availableEvidenceIds.includes(evidenceId))) {
+    return { status: 'inconclusive', cacheKey: cacheKeyValue, reason: 'malformed' };
+  }
+  if (parsed.data.confidence < judgeConfidenceThreshold || parsed.data.classification === 'inconclusive') {
+    return { status: 'inconclusive', cacheKey: cacheKeyValue, reason: 'low_confidence' };
+  }
+  cache?.set(cacheKeyValue, parsed.data);
+  return completeJudgeResult(cacheKeyValue, parsed.data, {
+    cached: false,
+    inputTokens: parsed.data.usage.inputTokens,
+    outputTokens: parsed.data.usage.outputTokens,
+    costUsd: parsed.data.usage.costUsd,
+    latencyMs: Math.round(performance.now() - startedAt),
+  });
+}
+
+export function combineDeterministicAndSemanticVerdict(deterministic: VerdictAssessment, semanticResults: readonly SemanticJudgeResult[]): VerdictAssessment {
+  if (deterministic.verdict.classification === 'suspected-regression' || deterministic.verdict.classification !== 'inconclusive') return deterministic;
+  if (deterministic.verdict.reasons.some((reason) => reason !== 'alignment_divergence')) return deterministic;
+  const completeResults = semanticResults.filter((result): result is Extract<SemanticJudgeResult, { readonly status: 'complete' }> => result.status === 'complete');
+  if (completeResults.length === 0 || completeResults.length !== semanticResults.length) return deterministic;
+  const responses = completeResults.map((result) => result.response);
+  const classifications = new Set(responses.map((response) => response.classification));
+  if (classifications.size !== 1) return deterministic;
+  const confidence = responses.every((response) => response.confidence >= 0.9) ? 'high' : 'medium';
+  const classification = responses[0]!.classification;
+  if (classification === 'no-material-change') {
+    return { ...deterministic, classification, verdict: { classification, severity: 'none', confidence } };
+  }
+  if (classification === 'suspected-regression') {
+    const severity = responses.some((response) => response.severity === 'high') ? 'high' : 'medium';
+    return { ...deterministic, classification, verdict: { classification, severity, confidence } };
+  }
+  return deterministic;
 }
