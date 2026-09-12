@@ -300,7 +300,7 @@ function SequenceRange({ range }: { range: readonly [number, number] | null }) {
 function ReportMasthead({ comparisonId }: { comparisonId: string }) {
   return (
     <header className="masthead report-masthead">
-      <a className="wordmark" href="/" aria-label="Varytra projects workspace">VARYTRA<span className="wordmark-mark">/</span></a>
+      <a className="wordmark" href="/app" aria-label="Varytra projects workspace">VARYTRA<span className="wordmark-mark">/</span></a>
       <p className="report-deep-link"><span>Comparison</span> {comparisonId}</p>
     </header>
   );

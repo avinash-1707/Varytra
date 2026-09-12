@@ -1,5 +1,6 @@
 import { type FormEvent, useEffect, useMemo, useState } from 'react';
 import { FirstRunOnboarding } from './onboarding';
+import { LandingPage } from './landing';
 import { readComparisonIdFromSearch, ReportScreen } from './report';
 
 const ORGANIZATION_STORAGE_KEY = 'x-varytra-organization';
@@ -1164,6 +1165,11 @@ function Workspace() {
 }
 
 export function App() {
+  const pathname = typeof window === 'undefined' ? '/' : window.location.pathname;
   const comparisonId = typeof window === 'undefined' ? null : readComparisonIdFromSearch(window.location.search);
+  if (pathname === '/') {
+    return <LandingPage />;
+  }
+
   return comparisonId === null ? <Workspace /> : <ReportScreen comparisonId={comparisonId} />;
 }
