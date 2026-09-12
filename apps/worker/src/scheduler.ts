@@ -1,7 +1,7 @@
 import { Queue, Worker } from 'bullmq';
 import { createDatabasePool, withOrganizationTransaction, type ArtifactStorage } from '@varytra/infrastructure';
 import { claimReviewNotification, markReviewNotificationDelivered, retryReviewNotification, type ReviewNotification } from '@varytra/infrastructure/review-notifications';
-import { claimRun, completeRunWithArtifacts, finishRun, readyOrganizationDispatches, recoverExpiredRuns, setRunProgress, type ClaimedRun, type SafeRunMetrics } from '@varytra/infrastructure/scheduling';
+import { claimExpiredArtifacts, claimRun, completeRunWithArtifacts, finishRun, markExpiredArtifactDeleted, readyOrganizationDispatches, recoverExpiredRuns, setRunProgress, type ClaimedRun, type SafeRunMetrics } from '@varytra/infrastructure/scheduling';
 import { ReferenceEnvironment } from '@varytra/reference-environment';
 import { normalizeTrace } from '@varytra/normalization';
 import { runDispatchSchema, type RunDispatch } from '@varytra/schemas';
@@ -78,11 +78,11 @@ async function persistExecution(
   execution: CompletedExecution,
 ): Promise<boolean> {
   const owner = await withOrganizationTransaction(database, organizationId, async (client) => {
-    const result = await client.query<Readonly<{ batchId: string; projectId: string }>>('SELECT batch_id AS "batchId", project_id AS "projectId" FROM agent_runs WHERE id = $1 AND lease_token = $2 AND status = \'running\'', [claimed.runId, claimed.leaseToken]);
+    const result = await client.query<Readonly<{ batchId: string; projectId: string; retentionDays: number }>>('SELECT run.batch_id AS "batchId", run.project_id AS "projectId", project.retention_days AS "retentionDays" FROM agent_runs run JOIN projects project ON project.id = run.project_id AND project.organization_id = run.organization_id WHERE run.id = $1 AND run.lease_token = $2 AND run.status = \'running\'', [claimed.runId, claimed.leaseToken]);
     return result.rows[0];
   });
   if (owner === undefined) return false;
-  const retentionDeadline = new Date(Date.now() + 90 * 24 * 60 * 60 * 1_000);
+  const retentionDeadline = new Date(Date.now() + owner.retentionDays * 24 * 60 * 60 * 1_000);
   const artifactOwner = { organizationId, projectId: owner.projectId, batchId: owner.batchId, runId: claimed.runId };
   const [raw, redacted, normalized] = await Promise.all([
     artifactStorage.write({ owner: artifactOwner, kind: 'raw-trace', content: execution.rawTrace, schemaVersion: '1.0', classification: 'restricted', retentionDeadline, creatorId: 'worker' }),
@@ -90,10 +90,23 @@ async function persistExecution(
     artifactStorage.write({ owner: artifactOwner, kind: 'normalized-trace', content: execution.normalizedTrace, schemaVersion: '1.0', classification: 'internal', retentionDeadline, creatorId: 'worker' }),
   ]);
   return completeRunWithArtifacts(database, organizationId, claimed.runId, claimed.leaseToken, [
-    { kind: 'raw-trace', storageRef: raw.key, contentHash: raw.contentHash, schemaVersion: '1.0', classification: 'restricted' },
-    { kind: 'redacted-trace', storageRef: redacted.key, contentHash: redacted.contentHash, schemaVersion: '1.0', classification: 'sensitive' },
-    { kind: 'normalized-trace', storageRef: normalized.key, contentHash: normalized.contentHash, schemaVersion: '1.0', classification: 'internal' },
+    { kind: 'raw-trace', storageRef: raw.key, contentHash: raw.contentHash, schemaVersion: '1.0', classification: 'restricted', retentionDeadline },
+    { kind: 'redacted-trace', storageRef: redacted.key, contentHash: redacted.contentHash, schemaVersion: '1.0', classification: 'sensitive', retentionDeadline },
+    { kind: 'normalized-trace', storageRef: normalized.key, contentHash: normalized.contentHash, schemaVersion: '1.0', classification: 'internal', retentionDeadline },
   ], execution.metrics, { finalState: execution.finalState, policyFailures: execution.policyFailures });
+}
+
+export async function cleanupExpiredArtifacts(database: ReturnType<typeof createDatabasePool>, artifactStorage: ArtifactStorage, organizationId: string, now = new Date()): Promise<number> {
+  const claims = await claimExpiredArtifacts(database, organizationId, now, 25);
+  for (const claim of claims) {
+    await artifactStorage.deleteExpired({
+      owner: { organizationId, projectId: claim.projectId, batchId: claim.batchId, runId: claim.runId },
+      kind: claim.kind,
+      contentHash: claim.contentHash,
+    }, now, claim.retentionDeadline);
+    await markExpiredArtifactDeleted(database, organizationId, claim.id, claim.claimToken);
+  }
+  return claims.length;
 }
 
 export async function executeClaimedRun(
@@ -131,6 +144,7 @@ export function startSchedulerWorker(input: Readonly<{
   const organizations = new Set(input.organizationIds ?? []);
   const reconcileOrganization = async (organizationId: string): Promise<void> => {
     await recoverExpiredRuns(database, organizationId);
+    if (input.artifactStorage !== undefined) await cleanupExpiredArtifacts(database, input.artifactStorage, organizationId);
     const dispatches = await readyOrganizationDispatches(database, organizationId);
     for (const dispatch of dispatches) await queue.add('agent-run', dispatch, { jobId: `dispatch-${dispatch.dispatchId}`, attempts: 3, backoff: { type: 'exponential', delay: 1_000 }, removeOnComplete: 1_000, removeOnFail: 1_000 });
     if (input.reviewNotificationSender !== undefined) await deliverReviewNotification(database, organizationId, input.reviewNotificationSender);

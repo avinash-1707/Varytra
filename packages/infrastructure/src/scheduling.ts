@@ -11,6 +11,18 @@ export interface RunArtifactLineage {
   readonly kind: 'raw-trace' | 'redacted-trace' | 'normalized-trace';
   readonly schemaVersion: string;
   readonly storageRef: string;
+  readonly retentionDeadline?: Date;
+}
+
+export interface ExpiredArtifactClaim {
+  readonly batchId: string;
+  readonly claimToken: string;
+  readonly contentHash: string;
+  readonly id: string;
+  readonly kind: RunArtifactLineage['kind'];
+  readonly projectId: string;
+  readonly retentionDeadline: Date;
+  readonly runId: string;
 }
 
 export interface SafeRunMetrics {
@@ -312,9 +324,9 @@ export async function completeRunWithArtifacts(pool: Pool, organizationId: strin
     if (row === undefined) return false;
     for (const artifact of artifacts) {
       await client.query(
-        `INSERT INTO agent_run_artifacts (organization_id, project_id, batch_id, run_id, kind, storage_ref, content_hash, schema_version, classification)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [organizationId, row.projectId, row.batchId, runId, artifact.kind, artifact.storageRef, artifact.contentHash, artifact.schemaVersion, artifact.classification],
+        `INSERT INTO agent_run_artifacts (organization_id, project_id, batch_id, run_id, kind, storage_ref, content_hash, schema_version, classification, retention_deadline)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, now() + interval '90 days'))`,
+        [organizationId, row.projectId, row.batchId, runId, artifact.kind, artifact.storageRef, artifact.contentHash, artifact.schemaVersion, artifact.classification, artifact.retentionDeadline ?? null],
       );
     }
     await client.query(
@@ -330,6 +342,43 @@ export async function completeRunWithArtifacts(pool: Pool, organizationId: strin
     await client.query(`UPDATE comparison_batches SET status = 'completed', progress_stage = CASE WHEN EXISTS (SELECT 1 FROM agent_runs WHERE batch_id = $1 AND status <> 'succeeded') THEN 'failed' ELSE 'complete' END, completed_at = now() WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM agent_runs WHERE batch_id = $1 AND status NOT IN ('succeeded', 'agent_failed', 'infrastructure_failed', 'timed_out'))`, [row.batchId]);
     await finalizeBatchReports(client, organizationId, row.batchId);
     return true;
+  });
+}
+
+export async function claimExpiredArtifacts(pool: Pool, organizationId: string, now: Date, limit: number): Promise<readonly ExpiredArtifactClaim[]> {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new SchedulingError('invalid_request');
+  const claimToken = randomUUID();
+  return withOrganizationTransaction(pool, organizationId, async (client) => {
+    const result = await client.query<ExpiredArtifactClaim>(
+      `WITH expired AS (
+         SELECT id FROM agent_run_artifacts
+         WHERE retention_deadline <= $1
+           AND deleted_at IS NULL
+           AND (retention_claim_expires_at IS NULL OR retention_claim_expires_at <= $1)
+         ORDER BY retention_deadline, created_at
+         FOR UPDATE SKIP LOCKED
+         LIMIT $2
+       )
+       UPDATE agent_run_artifacts artifact
+       SET retention_claim_token = $3, retention_claim_expires_at = $1 + interval '5 minutes'
+       FROM expired
+       WHERE artifact.id = expired.id
+       RETURNING artifact.id, artifact.project_id AS "projectId", artifact.batch_id AS "batchId", artifact.run_id AS "runId", artifact.kind, artifact.content_hash AS "contentHash", artifact.retention_deadline AS "retentionDeadline", artifact.retention_claim_token AS "claimToken"`,
+      [now, limit, claimToken],
+    );
+    return result.rows;
+  });
+}
+
+export async function markExpiredArtifactDeleted(pool: Pool, organizationId: string, artifactId: string, claimToken: string): Promise<boolean> {
+  return withOrganizationTransaction(pool, organizationId, async (client) => {
+    const result = await client.query(
+      `UPDATE agent_run_artifacts
+       SET deleted_at = now(), retention_claim_token = NULL, retention_claim_expires_at = NULL
+       WHERE id = $1 AND retention_claim_token = $2 AND deleted_at IS NULL`,
+      [artifactId, claimToken],
+    );
+    return result.rowCount === 1;
   });
 }
 

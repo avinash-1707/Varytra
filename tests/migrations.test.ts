@@ -34,6 +34,7 @@ describeDatabase('migrations', () => {
     '018_grant_report_immutability_trigger_access.sql',
     '019_create_ci_runs.sql',
     '020_create_review_notification_outbox.sql',
+    '021_add_artifact_retention_cleanup.sql',
     ]);
     expect(migrations.every((migration) => migration.checksum.length === 64)).toBe(true);
   });
@@ -72,6 +73,7 @@ describeDatabase('migrations', () => {
       '018_grant_report_immutability_trigger_access.sql',
       '019_create_ci_runs.sql',
       '020_create_review_notification_outbox.sql',
+      '021_add_artifact_retention_cleanup.sql',
     ]);
     expect(roles.rows).toEqual([
       { rolname: 'varytra_app', rolbypassrls: false },
