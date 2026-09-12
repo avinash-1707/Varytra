@@ -40,11 +40,14 @@ export async function createCiRun(pool: Pool, principal: CiPrincipal, input: Cre
     const inserted = await client.query<Readonly<{ id: string }>>(
       `INSERT INTO ci_runs (organization_id, project_id, api_key_id, batch_id, idempotency_key)
        VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (organization_id, project_id, idempotency_key) DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
+       ON CONFLICT (organization_id, project_id, idempotency_key) DO NOTHING
        RETURNING id`,
       [principal.organizationId, principal.projectId, principal.apiKeyId, batch.id, input.idempotencyKey],
     );
-    const row = inserted.rows[0];
+    const row = inserted.rows[0] ?? (await client.query<Readonly<{ id: string }>>(
+      'SELECT id FROM ci_runs WHERE organization_id = $1 AND project_id = $2 AND idempotency_key = $3',
+      [principal.organizationId, principal.projectId, input.idempotencyKey],
+    )).rows[0];
     if (row === undefined) throw new Error('CI run insert did not return an ID');
     return { id: row.id, batch };
   });

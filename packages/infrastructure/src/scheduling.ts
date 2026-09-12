@@ -163,6 +163,7 @@ export async function createComparisonBatch(pool: Pool, input: CreateComparisonB
   const requestFingerprint = fingerprint(input);
 
   return withOrganizationTransaction(pool, input.organizationId, async (client) => {
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${input.organizationId}:${input.projectId}:${input.idempotencyKey}`]);
     const existing = await client.query<Readonly<{ id: string; requestFingerprint: string; status: ComparisonBatch['status']; runCount: number }>>(
       `SELECT id, request_fingerprint AS "requestFingerprint", status,
         (SELECT count(*)::integer FROM agent_runs WHERE batch_id = comparison_batches.id) AS "runCount"
