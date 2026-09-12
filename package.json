@@ -8,11 +8,15 @@
     "lint": "eslint .",
     "typecheck": "pnpm -r typecheck",
     "test": "vitest run",
-    "db:migrate": "tsx packages/infrastructure/src/migrate.ts"
+    "db:migrate": "tsx packages/infrastructure/src/migrate.ts",
+    "test:a11y": "playwright test",
+    "test:load-cost": "vitest run tests/load-cost.test.ts"
   },
   "type": "module",
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.63.0",
     "@types/node": "^26.4.1",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",

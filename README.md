@@ -18,3 +18,16 @@ pnpm db:migrate
 pnpm test -- migrations
 pnpm test -- rls-foundation
 ```
+
+## Launch evidence
+
+Run the local evidence suite after PostgreSQL is available:
+
+```bash
+DATABASE_URL=postgres://varytra:varytra@127.0.0.1:5432/varytra pnpm db:migrate
+DATABASE_URL=postgres://varytra:varytra@127.0.0.1:5432/varytra pnpm test
+pnpm test:a11y
+pnpm test:load-cost
+```
+
+The reference benchmark demonstrates harmless variation and an unsafe refund regression without customer data. The browser audit checks automatically detectable WCAG A/AA issues on the unauthenticated workspace; manual accessibility review remains required. Provider-backed judge cost/latency, SMTP delivery, and Google OAuth callback validation require configured external credentials and are not claimed by the local suite.

@@ -756,12 +756,10 @@ footer {
 
 @keyframes project-state-enter {
   from {
-    opacity: 0;
     transform: translateY(6px);
   }
 
   to {
-    opacity: 1;
     transform: translateY(0);
   }
 }
@@ -2271,8 +2269,8 @@ footer {
 }
 
 @keyframes report-enter {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { transform: translateY(6px); }
+  to { transform: translateY(0); }
 }
 
 @media (max-width: 900px) {
