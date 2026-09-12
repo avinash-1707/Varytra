@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDatabasePool, withOrganizationTransaction } from '@varytra/infrastructure';
 import { runMigrations } from '@varytra/infrastructure/migrate';
+import { claimReviewNotification, markReviewNotificationDelivered, retryReviewNotification } from '@varytra/infrastructure/review-notifications';
 import { completeRunWithArtifacts, deriveComparisonReport, type RunOutcome } from '@varytra/infrastructure/scheduling';
 
 const baseOutcome = (side: 'baseline' | 'candidate', finalState: Readonly<Record<string, unknown>>, policyFailures: readonly string[] = []): RunOutcome => ({
@@ -52,9 +53,10 @@ describeDatabase('report-finalization persistence', () => {
   beforeAll(async () => {
     await runMigrations(connectionString!);
     await database!.query('TRUNCATE organizations, "user" CASCADE');
-    await database!.query('INSERT INTO "user" (id, name, email) VALUES ($1, $2, $3)', ['finalizer', 'Finalizer', 'finalizer@example.test']);
+    await database!.query('INSERT INTO "user" (id, name, email, "emailVerified") VALUES ($1, $2, $3, true), ($4, $5, $6, true), ($7, $8, $9, false)', ['finalizer', 'Finalizer', 'finalizer@example.test', 'stale', 'Stale', 'stale@example.test', 'viewer', 'Viewer', 'viewer@example.test']);
     await withOrganizationTransaction(database!, organizationId, async (client) => {
       await client.query('INSERT INTO organizations (id, name) VALUES ($1, $2)', [organizationId, 'Finalizer']);
+      await client.query("INSERT INTO organization_memberships (organization_id, user_id, role) VALUES ($1, 'finalizer', 'editor'), ($1, 'stale', 'editor'), ($1, 'viewer', 'viewer')", [organizationId]);
       await client.query('INSERT INTO projects (id, organization_id, name) VALUES ($1, $2, $3)', [projectId, organizationId, 'Finalizer project']);
       await client.query("INSERT INTO scenarios (id, organization_id, project_id, stable_key) VALUES ('91919191-9191-4191-8191-919191919191', $1, $2, 'finalizer')", [organizationId, projectId]);
       await client.query("INSERT INTO scenario_versions (id, organization_id, project_id, scenario_id, version, task_spec, fixture_ref, assertion_spec, efficiency_budget, content_hash, created_by_user_id) VALUES ($1, $2, $3, '91919191-9191-4191-8191-919191919191', 1, '{}', 'fixture://finalizer', $4, '{}', $5, 'finalizer')", [scenarioId, organizationId, projectId, { expected_state: { refundIssued: false, status: 'resolved' } }, 'a'.repeat(64)]);
@@ -75,8 +77,23 @@ describeDatabase('report-finalization persistence', () => {
     const metrics = { costUsd: 0, durationMs: 10, eventCount: 2, tokenUsage: 0, toolCallCount: 1 };
     await completeRunWithArtifacts(database!, organizationId, baselineRunId, baselineLease, artifacts(baselineRunId), metrics, { finalState: { refundIssued: false, status: 'resolved' }, policyFailures: [] });
     await completeRunWithArtifacts(database!, organizationId, candidateRunId, candidateLease, artifacts(candidateRunId), metrics, { finalState: { refundIssued: true, status: 'resolved' }, policyFailures: ['refund_requires_approval'] });
-    const comparison = await withOrganizationTransaction(database!, organizationId, async (client) => (await client.query('SELECT classification, severity, gate_status AS "gateStatus", summary_redacted AS summary FROM comparisons WHERE batch_id = $1', [batchId])).rows[0]);
+    const comparison = await withOrganizationTransaction(database!, organizationId, async (client) => (await client.query<Readonly<{ id: string; classification: string; severity: string; gateStatus: string; summary: string }>>('SELECT id, classification, severity, gate_status AS "gateStatus", summary_redacted AS summary FROM comparisons WHERE batch_id = $1', [batchId])).rows[0]);
     expect(comparison).toMatchObject({ classification: 'suspected-regression', severity: 'critical', gateStatus: 'block' });
     expect(JSON.stringify(comparison)).not.toContain('raw');
+    await withOrganizationTransaction(database!, organizationId, async (client) => { await client.query("DELETE FROM organization_memberships WHERE organization_id = $1 AND user_id = 'stale'", [organizationId]); });
+    const notification = await claimReviewNotification(database!, organizationId);
+    expect(notification).toMatchObject({ comparisonId: comparison?.id, projectId, recipientEmail: 'finalizer@example.test', severity: 'critical' });
+    expect(JSON.stringify(notification)).not.toContain('raw_trace');
+    expect(notification?.recipientEmail).not.toBe('viewer@example.test');
+    const staleState = await withOrganizationTransaction(database!, organizationId, async (client) => (await client.query<Readonly<{ status: string }>>("SELECT status FROM review_notification_outbox WHERE recipient_user_id = 'stale'", [])).rows[0]);
+    expect(staleState).toEqual({ status: 'cancelled' });
+    await retryReviewNotification(database!, organizationId, notification!.id);
+    const retryState = await withOrganizationTransaction(database!, organizationId, async (client) => (await client.query<Readonly<{ attemptCount: number; status: string }>>('SELECT attempt_count AS "attemptCount", status FROM review_notification_outbox WHERE id = $1', [notification!.id])).rows[0]);
+    expect(retryState).toEqual({ attemptCount: 1, status: 'queued' });
+    await withOrganizationTransaction(database!, organizationId, async (client) => { await client.query('UPDATE review_notification_outbox SET available_at = now() WHERE id = $1', [notification!.id]); });
+    const retried = await claimReviewNotification(database!, organizationId);
+    expect(retried?.id).toBe(notification?.id);
+    await markReviewNotificationDelivered(database!, organizationId, retried!.id);
+    expect(await claimReviewNotification(database!, organizationId)).toBeUndefined();
   });
 });

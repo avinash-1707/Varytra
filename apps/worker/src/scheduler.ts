@@ -1,5 +1,6 @@
 import { Queue, Worker } from 'bullmq';
 import { createDatabasePool, withOrganizationTransaction, type ArtifactStorage } from '@varytra/infrastructure';
+import { claimReviewNotification, markReviewNotificationDelivered, retryReviewNotification, type ReviewNotification } from '@varytra/infrastructure/review-notifications';
 import { claimRun, completeRunWithArtifacts, finishRun, readyOrganizationDispatches, recoverExpiredRuns, setRunProgress, type ClaimedRun, type SafeRunMetrics } from '@varytra/infrastructure/scheduling';
 import { ReferenceEnvironment } from '@varytra/reference-environment';
 import { normalizeTrace } from '@varytra/normalization';
@@ -22,6 +23,26 @@ export interface CompletedExecution {
 }
 
 export type RunExecutor = (input: Readonly<{ runId: string; side: 'baseline' | 'candidate' }>) => Promise<CompletedExecution>;
+
+export interface ReviewNotificationSender {
+  readonly send: (notification: ReviewNotification) => Promise<void>;
+}
+
+export async function deliverReviewNotification(
+  database: ReturnType<typeof createDatabasePool>,
+  organizationId: string,
+  sender: ReviewNotificationSender,
+): Promise<void> {
+  const notification = await claimReviewNotification(database, organizationId);
+  if (notification === undefined) return;
+  try {
+    await sender.send(notification);
+    await markReviewNotificationDelivered(database, organizationId, notification.id);
+  } catch {
+    // SMTP errors are retried from the durable outbox; the provider error can contain customer data.
+    await retryReviewNotification(database, organizationId, notification.id);
+  }
+}
 
 function serializeLines(value: unknown): Uint8Array {
   return new TextEncoder().encode(`${JSON.stringify(value)}\n`);
@@ -101,6 +122,7 @@ export function startSchedulerWorker(input: Readonly<{
   organizationIds?: readonly string[];
   organizationLimit: number;
   redisUrl: string;
+  reviewNotificationSender?: ReviewNotificationSender;
 }>): SchedulerWorker {
   const redis = new URL(input.redisUrl);
   const connection = { host: redis.hostname, port: Number(redis.port || '6379'), password: redis.password || undefined, maxRetriesPerRequest: null as null };
@@ -111,6 +133,7 @@ export function startSchedulerWorker(input: Readonly<{
     await recoverExpiredRuns(database, organizationId);
     const dispatches = await readyOrganizationDispatches(database, organizationId);
     for (const dispatch of dispatches) await queue.add('agent-run', dispatch, { jobId: `dispatch-${dispatch.dispatchId}`, attempts: 3, backoff: { type: 'exponential', delay: 1_000 }, removeOnComplete: 1_000, removeOnFail: 1_000 });
+    if (input.reviewNotificationSender !== undefined) await deliverReviewNotification(database, organizationId, input.reviewNotificationSender);
   };
   const reconciliationTimer = setInterval(() => { for (const organizationId of organizations) void reconcileOrganization(organizationId); }, 15_000);
   const worker = new Worker<RunDispatch>(queueName, async (job) => {

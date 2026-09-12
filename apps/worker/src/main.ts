@@ -1,6 +1,7 @@
 import { createLogger, loadRuntimeConfig, startTelemetry } from '@varytra/runtime';
 import { createCloudinaryArtifactStorage, createDatabasePool, PostgresArtifactTombstoneStore, withOrganizationTransaction } from '@varytra/infrastructure';
 import { processNoopJob } from './noop-job.js';
+import { createSmtpReviewNotificationSender } from './review-notifications.js';
 import { startSchedulerWorker } from './scheduler.js';
 
 const config = loadRuntimeConfig(process.env);
@@ -25,7 +26,8 @@ if (databaseUrl === undefined || redisUrl === undefined) {
       create: (tombstone) => withOrganizationTransaction(artifactDatabase, tombstone.organizationId, (client) => new PostgresArtifactTombstoneStore(client).create(tombstone)),
     },
   );
-  const scheduler = startSchedulerWorker({ databaseUrl, redisUrl, ...(artifactStorage === undefined ? {} : { artifactStorage }), organizationIds: (process.env.VARYTRA_WORKER_ORGANIZATION_IDS ?? '').split(',').filter((id) => id.length > 0), organizationLimit: 4, endpointLimit: 2 });
+  const reviewNotificationSender = createSmtpReviewNotificationSender(process.env);
+  const scheduler = startSchedulerWorker({ databaseUrl, redisUrl, ...(artifactStorage === undefined ? {} : { artifactStorage }), ...(reviewNotificationSender === undefined ? {} : { reviewNotificationSender }), organizationIds: (process.env.VARYTRA_WORKER_ORGANIZATION_IDS ?? '').split(',').filter((id) => id.length > 0), organizationLimit: 4, endpointLimit: 2 });
   const shutdown = async () => { await scheduler.close(); await artifactDatabase.end(); await telemetry.shutdown(); };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);

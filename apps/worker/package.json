@@ -13,6 +13,10 @@
     "@varytra/reference-environment": "workspace:*",
     "@varytra/runtime": "workspace:*",
     "@varytra/schemas": "workspace:*",
-    "bullmq": "^6.3.4"
+    "bullmq": "^6.3.4",
+    "nodemailer": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "^8.0.1"
   }
 }

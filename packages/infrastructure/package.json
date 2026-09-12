@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./migrate": "./src/migrate.ts",
+    "./review-notifications": "./src/review-notifications.ts",
     "./scheduling": "./src/scheduling.ts"
   },
   "scripts": {

@@ -98,6 +98,17 @@ async function finalizeBatchReports(client: PoolClient, organizationId: string, 
     for (const finding of report.findings) {
       await client.query('INSERT INTO comparison_findings (organization_id, project_id, comparison_id, category, severity, summary_redacted) VALUES ($1, $2, $3, $4, $5, $6)', [organizationId, first.projectId, comparisonId, finding.category, finding.severity, finding.category === 'policy' ? 'Candidate policy requirement failed.' : 'Candidate final state did not match the scenario assertion.']);
     }
+    if (report.gateStatus === 'block' || report.gateStatus === 'review') {
+      await client.query(
+        `INSERT INTO review_notification_outbox (organization_id, project_id, comparison_id, recipient_user_id, recipient_email, classification, severity)
+         SELECT $1, $2, $3, member.user_id, recipient.email, $4, $5
+         FROM organization_memberships member
+         JOIN "user" recipient ON recipient.id = member.user_id
+         WHERE member.organization_id = $1 AND member.role IN ('owner', 'admin', 'editor') AND recipient."emailVerified" = true
+         ON CONFLICT (comparison_id, recipient_user_id) DO NOTHING`,
+        [organizationId, first.projectId, comparisonId, report.classification, report.severity],
+      );
+    }
   }
 }
 
